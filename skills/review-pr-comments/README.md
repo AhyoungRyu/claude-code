@@ -10,10 +10,31 @@ Automates GitHub PR code review processing workflow.
 
 ## Installation
 
+### Option 1: Standard Installation
+
 ```bash
+# Clone repository
 git clone https://github.com/AhyoungRyu/claude-code.git
+
+# Install skills
 cp -r claude-code/skills/review-pr-comments ~/.claude/skills/
 cp -r claude-code/skills/humanizer ~/.claude/skills/
+```
+
+### Option 2: Using OMC (oh-my-claudecode)
+
+```bash
+# Clone repository
+git clone https://github.com/AhyoungRyu/claude-code.git
+cd claude-code
+
+# Install using OMC
+omc skill add skills/review-pr-comments
+omc skill add skills/humanizer
+
+# Or use symlinks for auto-updates
+ln -s $(pwd)/skills/review-pr-comments ~/.claude/skills/review-pr-comments
+ln -s $(pwd)/skills/humanizer ~/.claude/skills/humanizer
 ```
 
 ## Basic Usage
