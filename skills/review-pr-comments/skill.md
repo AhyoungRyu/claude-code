@@ -235,3 +235,128 @@ Always use the `/humanizer` skill to:
 - Always verify PR number and reviewer before posting
 - Handle edge cases: no comments found, PR already merged, invalid reviewer
 - **Always append footer:** `---\n<sub>Written by Claude Code</sub>` at the end of every posted comment
+
+---
+
+## GitHub Links in Response
+
+When posting responses, automatically include relevant GitHub links for easy verification:
+
+### Link Types
+
+1. **Commit links** - If `--commit` flag used, link to the commit
+2. **File/line links** - Link to specific changed lines
+3. **Diff links** - Link to compare view for multiple files
+
+### Implementation
+
+**Get commit hash:**
+```bash
+git rev-parse HEAD
+```
+
+**Generate links:**
+- Commit: `https://github.com/{owner}/{repo}/commit/{hash}`
+- File line: `https://github.com/{owner}/{repo}/blob/{branch}/{file}#L{line}`
+- Compare: `https://github.com/{owner}/{repo}/compare/{base}...{head}`
+
+### Updated Response Format
+
+**Korean with links:**
+```
+@reviewer
+
+오늘 남겨주신 코멘트들 모두 반영했습니다!
+
+### 반영 내용
+
+**1. `_isSendable` 메서드를 DefaultStatCollector 패턴과 동일하게 수정** ([#19](https://github.com/org/repo/blob/branch/src/stat/aiAgentStatCollector.ts#L19))
+- DefaultStatCollector와 동일한 패턴으로 수정
+
+**2. appendStat 문서화 최소화** ([#405](https://github.com/org/repo/blob/branch/src/module/aiAgentModule.ts#L405))
+- 내부용 API라서 상세한 파라미터 설명 제거, `@experimental` 어노테이션만 남김
+
+**3. "more than limit pending" 테스트 수정** ([#90](https://github.com/org/repo/blob/branch/test/v3/case/stat/aiAgentStatCollector.test.ts#L90))
+- ready 블록에서 `context.connect()` 호출 제거
+- assertion을 `flushWaitQueue.toHaveLength(numberOfLogs)`로 변경
+
+### 관련 커밋
+- [24a163e](https://github.com/org/repo/commit/24a163e27) - test: address PR review comments for AI Agent stats
+
+---
+<sub>Written by Claude Code</sub>
+```
+
+**English with links:**
+```
+@reviewer
+
+All comments have been addressed!
+
+### Changes Made
+
+**1. Updated `_isSendable` method to match DefaultStatCollector** ([#19](https://github.com/org/repo/blob/branch/src/stat/aiAgentStatCollector.ts#L19))
+- Updated to match DefaultStatCollector pattern
+
+**2. Minimized appendStat documentation** ([#405](https://github.com/org/repo/blob/branch/src/module/aiAgentModule.ts#L405))
+- Removed detailed parameter descriptions, kept only `@experimental` annotation
+
+**3. Fixed "more than limit pending" test** ([#90](https://github.com/org/repo/blob/branch/test/v3/case/stat/aiAgentStatCollector.test.ts#L90))
+- Removed `context.connect()` call from ready block
+- Changed assertion to verify PENDING state
+
+### Related Commits
+- [24a163e](https://github.com/org/repo/commit/24a163e27) - test: address PR review comments for AI Agent stats
+
+---
+<sub>Written by Claude Code</sub>
+```
+
+### Link Format Examples
+
+**File/line link:**
+```markdown
+[#42](https://github.com/sendbird/chat-js/blob/feat/ai-agent-stats/src/module/aiAgentModule.ts#L42)
+```
+
+**Commit link:**
+```markdown
+[24a163e](https://github.com/sendbird/chat-js/commit/24a163e27)
+```
+
+**Range link (multiple lines):**
+```markdown
+[#90-131](https://github.com/sendbird/chat-js/blob/feat/ai-agent-stats/test/aiAgentStatCollector.test.ts#L90-L131)
+```
+
+### Auto-detection Logic
+
+1. **Extract repo info:**
+   ```bash
+   git remote get-url origin
+   # git@github.com:sendbird/chat-js.git
+   ```
+
+2. **Parse owner/repo:**
+   ```bash
+   # Extract: sendbird/chat-js
+   ```
+
+3. **Get current branch:**
+   ```bash
+   git branch --show-current
+   # feat/ai-agent-stats
+   ```
+
+4. **Build URLs:**
+   - Base: `https://github.com/{owner}/{repo}`
+   - Blob: `{base}/blob/{branch}/{file}#L{line}`
+   - Commit: `{base}/commit/{hash}`
+
+### Benefits
+
+- ✅ Reviewers can click to see exact changes
+- ✅ Faster verification
+- ✅ Clear audit trail
+- ✅ Professional response format
+- ✅ Works with GitHub's native line highlighting
