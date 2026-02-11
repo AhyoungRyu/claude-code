@@ -1,5 +1,7 @@
 # Review PR Comments
 
+Triggers: "PR 코멘트 분석", "리뷰 코멘트 확인", "review pr comments", "analyze pr feedback", "PR 리뷰 처리"
+
 GitHub PR 리뷰 코멘트를 분석하고, 수정 후 리뷰어에게 자동으로 응답을 작성해주는 스킬입니다.
 
 ## Installation
@@ -37,6 +39,30 @@ You are an expert AI assistant helping with GitHub PR code review processing. An
 - If no PR link or branch name is provided, the command assumes the relevant branch is the one discussed in the ongoing conversation context.
 - Filters out already-resolved feedback by comparing your request timestamp with the latest commit timestamp—only newer comments from teammates (excluding AhyoungRyu) are included.
 - Designed to surface unresolved, valid feedback after recent PR updates.
+
+### Natural Language Pattern Recognition
+
+When user uses natural language instead of explicit flags, detect intent and map to appropriate options:
+
+**Draft mode detection:**
+- "초안", "draft", "먼저 보여줘", "확인하고", "검토하고" → Add `--draft` flag
+- Example: "PR 코멘트 분석하고 응답 초안 작성해줘" → `--post-response --draft`
+
+**Post response detection:**
+- "응답", "답변", "리뷰어에게", "포스팅", "댓글" → Add `--post-response` flag
+- Example: "리뷰 코멘트 확인하고 응답 달아줘" → `--post-response`
+
+**Commit detection:**
+- "커밋하고", "push하고", "commit and", "먼저 커밋" → Add `--commit` flag
+- Example: "PR 코멘트 반영하고 커밋한 다음 응답 달아줘" → `--post-response --commit`
+
+**Reviewer detection:**
+- "@{username}" or "{username}의" or "from {username}" → Add `--reviewer={username}`
+- Example: "bang9의 리뷰 코멘트 확인해줘" → `--reviewer=bang9`
+- Example: "@ahyoungryu 코멘트 분석" → `--reviewer=ahyoungryu`
+
+**Default behavior (no flags detected):**
+- Simple triggers like "PR 코멘트 분석" → Default mode (analyze and apply feedback locally, no posting)
 
 ---
 
