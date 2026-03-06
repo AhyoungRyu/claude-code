@@ -47,52 +47,44 @@ Examples:
 flowchart TD
     START(["/playbook goal"]) --> R
 
-    subgraph R["Step R — Reset and detect"]
+    subgraph R["Step R - Reset and detect"]
         R1{".omc/ exists?"}
-        R1 -->|Yes| R2["PLAYBOOK_DIR = .omc/playbook"]
-        R1 -->|No|  R3["PLAYBOOK_DIR = .context/playbook"]
+        R1 -->|Yes| R2[".omc/playbook"]
+        R1 -->|No| R3[".context/playbook"]
         R2 & R3 --> R4["init work.md, result.md, plan.md"]
     end
 
-    R --> A["Step A — Classify task type
-    code-change, refactor, code-cleanup
-    file-ops, research, config, docs, planning"]
+    R --> A["Step A - Classify task type"]
 
-    A --> C["Step C — Scan skills
-    writes skills_snapshot.md"]
+    A --> C["Step C - Scan skills, write skills_snapshot.md"]
 
     C --> C2{"steering.md exists?"}
-    C2 -->|Yes| C2R["read steering.md
-    inject as hard constraints"]
-    C2 -->|No|  D
+    C2 -->|Yes| C2R["read + inject steering.md"]
+    C2 -->|No| D
     C2R --> D
 
-    subgraph D["Step D — Author runbook"]
+    subgraph D["Step D - Author runbook"]
         DA{"OMC available?"}
         DA -->|omc-teams| DB["Codex writes runbook"]
-        DA -->|no OMC|   DC["Claude writes runbook"]
+        DA -->|no OMC| DC["Claude writes runbook"]
         DB & DC --> DD["writes work.md"]
     end
 
     D --> ISSUE{"issues in Consistency Check?"}
-    ISSUE -->|Yes| STOP1["surface issues
-    wait for user input"]
-    ISSUE -->|No|  CT
+    ISSUE -->|Yes| STOP1["surface issues, wait for user"]
+    ISSUE -->|No| CT
 
-    CT{"Code task?
-    code-change, refactor, code-cleanup"}
-    CT -->|Yes| E2["Step E2
-    writes plan.md
-    before any code is touched"]
-    CT -->|No|  F
+    CT{"Code task?"}
+    CT -->|Yes| E2["Step E2 - writes plan.md"]
+    CT -->|No| F
 
     E2 --> F
 
-    subgraph F["Step F — Execute runbook"]
+    subgraph F["Step F - Execute runbook"]
         FA["invoke skills/agents from snapshot"]
         FA --> FB{"Critical gate?"}
         FB -->|Yes| STOP2["ask user"]
-        FB -->|No|  FC["continue phases"]
+        FB -->|No| FC["continue phases"]
         FC --> FD["writes result.md"]
     end
 
