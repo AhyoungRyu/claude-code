@@ -45,25 +45,25 @@ Examples:
 
 ```mermaid
 flowchart TD
-    START(["/playbook &lt;goal&gt;"]) --> R
+    START(["/playbook goal"]) --> R
 
-    subgraph R["Step R — Reset &amp; detect"]
-        R1{"<code>.omc/</code> exists?"}
-        R1 -->|Yes| R2["PLAYBOOK_DIR = <code>.omc/playbook</code>"]
-        R1 -->|No|  R3["PLAYBOOK_DIR = <code>.context/playbook</code>"]
-        R2 & R3 --> R4["✍ init work.md · result.md · plan.md"]
+    subgraph R["Step R — Reset and detect"]
+        R1{".omc/ exists?"}
+        R1 -->|Yes| R2["PLAYBOOK_DIR = .omc/playbook"]
+        R1 -->|No|  R3["PLAYBOOK_DIR = .context/playbook"]
+        R2 & R3 --> R4["init work.md, result.md, plan.md"]
     end
 
     R --> A["Step A — Classify task type
-    code-change · refactor · code-cleanup
-    file-ops · research · config · docs · planning"]
+    code-change, refactor, code-cleanup
+    file-ops, research, config, docs, planning"]
 
     A --> C["Step C — Scan skills
-    ✍ skills_snapshot.md"]
+    writes skills_snapshot.md"]
 
-    C --> C2{"<code>steering.md</code>
-    exists?"}
-    C2 -->|Yes| C2R["📖 read steering.md\n(inject as hard constraints)"]
+    C --> C2{"steering.md exists?"}
+    C2 -->|Yes| C2R["read steering.md
+    inject as hard constraints"]
     C2 -->|No|  D
     C2R --> D
 
@@ -71,21 +71,19 @@ flowchart TD
         DA{"OMC available?"}
         DA -->|omc-teams| DB["Codex writes runbook"]
         DA -->|no OMC|   DC["Claude writes runbook"]
-        DB & DC --> DD["✍ work.md"]
+        DB & DC --> DD["writes work.md"]
     end
 
-    D --> ISSUE{"⚠️ issues in
-    Consistency Check?"}
-    ISSUE -->|Yes| STOP1["🛑 surface issues
+    D --> ISSUE{"issues in Consistency Check?"}
+    ISSUE -->|Yes| STOP1["surface issues
     wait for user input"]
     ISSUE -->|No|  CT
 
     CT{"Code task?
-    code-change / refactor
-    code-cleanup"}
+    code-change, refactor, code-cleanup"}
     CT -->|Yes| E2["Step E2
-    ✍ plan.md
-    (before any code is touched)"]
+    writes plan.md
+    before any code is touched"]
     CT -->|No|  F
 
     E2 --> F
@@ -93,9 +91,9 @@ flowchart TD
     subgraph F["Step F — Execute runbook"]
         FA["invoke skills/agents from snapshot"]
         FA --> FB{"Critical gate?"}
-        FB -->|Yes| STOP2["🛑 ask user"]
+        FB -->|Yes| STOP2["ask user"]
         FB -->|No|  FC["continue phases"]
-        FC --> FD["✍ result.md"]
+        FC --> FD["writes result.md"]
     end
 
     F --> DONE(["Present summary to user"])
