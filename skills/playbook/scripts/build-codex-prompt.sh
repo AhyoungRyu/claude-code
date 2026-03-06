@@ -29,8 +29,8 @@ if [ ! -f "$SKILLS_SNAPSHOT" ]; then
   exit 1
 fi
 
-# 너무 길어지는 것을 방지: 기본은 Top list 섹션만 추출해서 넣고,
-# Top list가 없으면 전체를 넣되 4000라인까지만 제한.
+# Prefer the "Top list" section only to keep the prompt concise;
+# fall back to the full snapshot (up to 4000 lines) if no Top list exists.
 SKILLS_BLOCK="$(awk '
   BEGIN{in=0}
   /^## Top list/{in=1; next}
@@ -42,8 +42,8 @@ if [ -z "$SKILLS_BLOCK" ]; then
   SKILLS_BLOCK="$(head -n 4000 "$SKILLS_SNAPSHOT")"
 fi
 
-# 템플릿 치환 (단순 placeholder 치환)
-# - sed에서 개행/특수문자 처리가 까다로워서 awk로 안전하게 처리
+# Substitute template placeholders.
+# awk is used instead of sed to safely handle newlines and special characters.
 awk -v um="$USER_MESSAGE" -v skills="$SKILLS_BLOCK" '
   {
     gsub(/\{\{USER_MESSAGE\}\}/, um)

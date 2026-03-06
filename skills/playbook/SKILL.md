@@ -85,14 +85,14 @@ If a task spans multiple types, pick the dominant type and note the secondary ty
 
 | Type | Examples | Phase template |
 |------|----------|----------------|
-| `code-change` | 새 기능, 버그픽스, 타입 수정 | Baseline → Plan → Implement → Proof |
-| `refactor` | 구조 개선, 파일 이동+코드 변경 혼합, 모듈 분리 | Baseline → Plan → Refactor → Proof |
-| `code-cleanup` | dead code 제거, 사용하지 않는 import/변수/함수 정리 | Scan → Plan → Remove → Proof |
-| `file-ops` | 파일 정리/삭제/이동/이름 변경 (코드 변경 없음) | Inventory → Plan → Execute → Verify |
-| `research` | 코드 분석, 감사, 패턴 파악 | Context → Analyze → Report |
-| `config` | package.json, CI, tsconfig, 설정 변경 | Baseline → Change → Verify |
-| `docs` | 문서 작성/수정, README, 주석 | Draft → Review → Finalize |
-| `planning` | 아키텍처, 설계 결정, 기술 선택 | Context → Options → Recommend |
+| `code-change` | new features, bug fixes, type changes | Baseline → Plan → Implement → Proof |
+| `refactor` | structural improvements, mixed file moves + code changes, module extraction | Baseline → Plan → Refactor → Proof |
+| `code-cleanup` | dead code removal, unused imports/variables/functions | Scan → Plan → Remove → Proof |
+| `file-ops` | file organization/deletion/move/rename (no code changes) | Inventory → Plan → Execute → Verify |
+| `research` | code analysis, auditing, pattern identification | Context → Analyze → Report |
+| `config` | package.json, CI, tsconfig, configuration changes | Baseline → Change → Verify |
+| `docs` | documentation writing/editing, README, comments | Draft → Review → Finalize |
+| `planning` | architecture, design decisions, tech choices | Context → Options → Recommend |
 
 Record the chosen type (and secondary type if mixed) at the top of the runbook.
 
