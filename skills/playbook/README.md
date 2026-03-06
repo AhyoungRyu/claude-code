@@ -90,13 +90,13 @@ flowchart TD
 
     F --> DONE(["Present summary to user"])
 
-    style START fill:#e8f4fd,stroke:#0d6efd
-    style DONE  fill:#d1e7dd,stroke:#198754
-    style STOP1 fill:#fff3cd,stroke:#ffc107
-    style STOP2 fill:#fff3cd,stroke:#ffc107
-    style R     fill:#f8f9fa,stroke:#adb5bd
-    style D     fill:#f8f9fa,stroke:#adb5bd
-    style F     fill:#f8f9fa,stroke:#adb5bd
+    style START fill:#1a73e8,stroke:#0d6efd,color:#ffffff
+    style DONE  fill:#198754,stroke:#157a47,color:#ffffff
+    style STOP1 fill:#e65c00,stroke:#c94f00,color:#ffffff
+    style STOP2 fill:#e65c00,stroke:#c94f00,color:#ffffff
+    style R     fill:#2d2d2d,stroke:#666666,color:#ffffff
+    style D     fill:#2d2d2d,stroke:#666666,color:#ffffff
+    style F     fill:#2d2d2d,stroke:#666666,color:#ffffff
 ```
 
 ## Artifacts
