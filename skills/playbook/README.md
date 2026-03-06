@@ -45,7 +45,7 @@ Examples:
 
 ```mermaid
 flowchart TD
-    START(["/playbook goal"]) --> R
+    START(["/playbook {your goal}"]) --> R
 
     subgraph R["Step R - Reset artifacts"]
         R1{".omc/ exists?"}
