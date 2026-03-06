@@ -16,14 +16,14 @@ Given the user's goal (any type), you will:
 1) **Reset run artifacts** (Step R) — overwrite work.md, result.md, plan.md with a timestamped header.
 2) Classify the task type to select the appropriate phase template and constraints.
 3) Snapshot all available Claude Code skills by scanning standard skill directories (do NOT rely on `/skills`).
-4) Load persistent steering context from `.omc/playbook/steering.md` if it exists.
+4) Load persistent steering context from `$PLAYBOOK_DIR/steering.md` if it exists.
 5) Delegate to Codex (via `/oh-my-claudecode:omc-teams 1:codex`) to produce a high-quality runbook:
    - The runbook must match the detected task type (not always code-focused).
    - The runbook must be generic and repo-aware (detect available scripts/commands; do not assume).
    - The runbook must maximize correct use of available skills.
    - The runbook must include a cross-phase consistency check section.
-6) Save the runbook to `.omc/playbook/work.md`.
-7) For code tasks (`code-change`, `refactor`, `code-cleanup`): extract the Plan phase to `.omc/playbook/plan.md` BEFORE any implementation starts.
+6) Save the runbook to `$PLAYBOOK_DIR/work.md`.
+7) For code tasks (`code-change`, `refactor`, `code-cleanup`): extract the Plan phase to `$PLAYBOOK_DIR/plan.md` BEFORE any implementation starts.
 8) Execute immediately unless a critical gate is triggered (see Step F).
 
 ---
@@ -102,7 +102,7 @@ Record the chosen type (and secondary type if mixed) at the top of the runbook.
 
 **All tasks:**
 - Minimal scope: do only what was asked, no extras.
-- Produce trace artifacts under `.omc/playbook/`.
+- Produce trace artifacts under `$PLAYBOOK_DIR/`.
 
 **`code-change` only:**
 - No `any`, no `as any`, no `ts-ignore`.
@@ -142,7 +142,7 @@ Record the chosen type (and secondary type if mixed) at the top of the runbook.
 
 ## Step C — Skills snapshot (deterministic)
 
-Run the scan script to generate `.omc/playbook/skills_snapshot.md`:
+Run the scan script to generate `$PLAYBOOK_DIR/skills_snapshot.md`:
 
 ```bash
 bash ~/.claude/skills/playbook/scripts/scan-skills.sh "$PLAYBOOK_DIR/skills_snapshot.md"
@@ -167,7 +167,7 @@ The snapshot produces two sections:
 
 ## Step C2 — Load Steering Context
 
-Check if `.omc/playbook/steering.md` exists in the current repo.
+Check if `$PLAYBOOK_DIR/steering.md` exists in the current repo.
 
 - **If it exists:** read the full content. This will be injected into the Codex prompt as `STEERING CONTEXT`.
 - **If it doesn't exist:** skip — no steering context will be passed.
@@ -178,7 +178,7 @@ Steering captures persistent project-level knowledge that should constrain every
 - Naming conventions and folder structure rules
 - Outcomes from past playbook runs worth remembering
 
-Users can edit `.omc/playbook/steering.md` directly at any time.
+Users can edit `$PLAYBOOK_DIR/steering.md` directly at any time.
 After a run, if significant decisions were made, offer to append a summary to steering.md.
 
 ---
@@ -209,7 +209,7 @@ The runbook Codex produces MUST satisfy:
 - For mixed types, includes phases and constraints from both types.
 - Includes a **"Skill Orchestration"** section: maps each step to a specific skill from the snapshot; uses only skills that actually exist; prefers fewer skills if they cover the need.
 - Is repo-agnostic: may inspect package.json scripts; must NOT assume specific workspace names.
-- Creates trace artifacts under `.omc/playbook/`: `baseline.md` (if applicable), `plan.md`, `result.md`.
+- Creates trace artifacts under `$PLAYBOOK_DIR/`: `baseline.md` (if applicable), `plan.md`, `result.md`.
 - Includes a **"Consistency Check"** section at the end (see Step D2).
 - Scales complexity to the task: simple file-ops → concise runbook; complex code-change → full runbook.
 
@@ -231,7 +231,7 @@ If any issue is found, the runbook must note it inline as `⚠️ ISSUE: <descri
 
 ## Step E — Materialize
 
-Write Codex output to `.omc/playbook/work.md` exactly.
+Write Codex output to `$PLAYBOOK_DIR/work.md` exactly.
 
 If the Consistency Check section contains any `⚠️ ISSUE:` entries:
 - Surface them to the user.
@@ -247,7 +247,7 @@ If no issues: proceed to Step E2 immediately without asking.
 **Applies to: `code-change`, `refactor`, `code-cleanup` tasks.**
 For other task types (research, docs, planning, file-ops, config): skip this step, proceed to Step F.
 
-Extract the Plan phase from `work.md` and write it to `.omc/playbook/plan.md` **before any code is touched**.
+Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` **before any code is touched**.
 
 `plan.md` MUST include:
 1. **Files to modify** — list each file path and the nature of change
@@ -257,7 +257,7 @@ Extract the Plan phase from `work.md` and write it to `.omc/playbook/plan.md` **
    - If no skill applies to a step, explicitly note "direct implementation" with one-line justification
 4. **Test/build gates** — which commands will be run after implementation to prove correctness
 
-**Hard gate**: `.omc/playbook/plan.md` MUST be written and non-empty before Step F begins.
+**Hard gate**: `$PLAYBOOK_DIR/plan.md` MUST be written and non-empty before Step F begins.
 The plan.md must reference at least one skill from `skills_snapshot.md` by name.
 Do NOT start modifying source files until plan.md exists on disk.
 
@@ -281,7 +281,7 @@ For all other situations — including ambiguous task types, multiple valid appr
 
 **Mandatory result.md gate — write this before declaring completion:**
 
-Write the run summary to `.omc/playbook/result.md` (overwrite), containing:
+Write the run summary to `$PLAYBOOK_DIR/result.md` (overwrite), containing:
 
 ```markdown
 # result.md
@@ -295,7 +295,7 @@ Task type: <classified type>
 <list each by exact slash-command / agent name, or "none" for research tasks>
 
 ## Artifacts produced
-<list of files written under .omc/playbook/>
+<list of files written under $PLAYBOOK_DIR/>
 
 ## Risks / TODOs
 <any open items, or "none">
@@ -309,16 +309,15 @@ Then present a brief summary to the user (what changed, artifacts produced, any 
 
 ## Output directory (MANDATORY)
 
-Write ALL artifacts under:
-- `.omc/playbook/`
+Write ALL artifacts under `$PLAYBOOK_DIR/` (determined in Step R: `.omc/playbook/` or `.context/playbook/`).
 
 Expected artifacts:
-- `.omc/playbook/skills_snapshot.md`
-- `.omc/playbook/steering.md` (persistent across runs; user-managed)
-- `.omc/playbook/work.md`
-- `.omc/playbook/baseline.md` (if applicable)
-- `.omc/playbook/plan.md` ← **REQUIRED before execution for code-change / refactor / code-cleanup**
-- `.omc/playbook/result.md` ← **REQUIRED at end of every run**
+- `$PLAYBOOK_DIR/skills_snapshot.md`
+- `$PLAYBOOK_DIR/steering.md` (persistent across runs; user-managed)
+- `$PLAYBOOK_DIR/work.md`
+- `$PLAYBOOK_DIR/baseline.md` (if applicable)
+- `$PLAYBOOK_DIR/plan.md` ← **REQUIRED before execution for code-change / refactor / code-cleanup**
+- `$PLAYBOOK_DIR/result.md` ← **REQUIRED at end of every run**
 
 Do NOT write to `docs/` or `.ai/`.
 
@@ -334,5 +333,5 @@ Do NOT write to `docs/` or `.ai/`.
 - Consistency Check passes (no `⚠️ ISSUE:` entries), or issues are surfaced and resolved.
 - **For code tasks: `plan.md` is written to disk BEFORE the first source file is touched.**
 - **Skills from `skills_snapshot.md` are referenced by exact name in `work.md` and `plan.md` — and actually invoked via `Skill`/`Agent` tool during Step F execution (not just mentioned in text).**
-- `.omc/playbook/result.md` is written and non-empty at the end of every run (verifiable on disk).
-- `.omc/playbook/work.md` contains the current run's timestamp (not a stale previous run's content).
+- `$PLAYBOOK_DIR/result.md` is written and non-empty at the end of every run (verifiable on disk).
+- `$PLAYBOOK_DIR/work.md` contains the current run's timestamp (not a stale previous run's content).
