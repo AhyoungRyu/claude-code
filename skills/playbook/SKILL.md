@@ -104,7 +104,7 @@ Record the chosen type (and secondary type if mixed) at the top of the runbook.
 - Minimal scope: do only what was asked, no extras.
 - Produce trace artifacts under `$PLAYBOOK_DIR/`.
 
-**`code-change` only:**
+**`code-change` only (new features, bug fixes, type/API changes):**
 - No `any`, no `as any`, no `ts-ignore`.
 - No regressions — tests and build must stay green.
 - No public API surface changes unless user explicitly allows it.

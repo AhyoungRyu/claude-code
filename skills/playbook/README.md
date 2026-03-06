@@ -41,6 +41,74 @@ Examples:
 /playbook update README to reflect the new monorepo structure
 ```
 
+## How it works
+
+```mermaid
+flowchart TD
+    START(["/playbook &lt;goal&gt;"]) --> R
+
+    subgraph R["Step R — Reset &amp; detect"]
+        R1{"<code>.omc/</code> exists?"}
+        R1 -->|Yes| R2["PLAYBOOK_DIR = <code>.omc/playbook</code>"]
+        R1 -->|No|  R3["PLAYBOOK_DIR = <code>.context/playbook</code>"]
+        R2 & R3 --> R4["✍ init work.md · result.md · plan.md"]
+    end
+
+    R --> A["Step A — Classify task type
+    code-change · refactor · code-cleanup
+    file-ops · research · config · docs · planning"]
+
+    A --> C["Step C — Scan skills
+    ✍ skills_snapshot.md"]
+
+    C --> C2{"<code>steering.md</code>
+    exists?"}
+    C2 -->|Yes| C2R["📖 read steering.md\n(inject as hard constraints)"]
+    C2 -->|No|  D
+    C2R --> D
+
+    subgraph D["Step D — Author runbook"]
+        DA{"OMC available?"}
+        DA -->|omc-teams| DB["Codex writes runbook"]
+        DA -->|no OMC|   DC["Claude writes runbook"]
+        DB & DC --> DD["✍ work.md"]
+    end
+
+    D --> ISSUE{"⚠️ issues in
+    Consistency Check?"}
+    ISSUE -->|Yes| STOP1["🛑 surface issues
+    wait for user input"]
+    ISSUE -->|No|  CT
+
+    CT{"Code task?
+    code-change / refactor
+    code-cleanup"}
+    CT -->|Yes| E2["Step E2
+    ✍ plan.md
+    (before any code is touched)"]
+    CT -->|No|  F
+
+    E2 --> F
+
+    subgraph F["Step F — Execute runbook"]
+        FA["invoke skills/agents from snapshot"]
+        FA --> FB{"Critical gate?"}
+        FB -->|Yes| STOP2["🛑 ask user"]
+        FB -->|No|  FC["continue phases"]
+        FC --> FD["✍ result.md"]
+    end
+
+    F --> DONE(["Present summary to user"])
+
+    style START fill:#e8f4fd,stroke:#0d6efd
+    style DONE  fill:#d1e7dd,stroke:#198754
+    style STOP1 fill:#fff3cd,stroke:#ffc107
+    style STOP2 fill:#fff3cd,stroke:#ffc107
+    style R     fill:#f8f9fa,stroke:#adb5bd
+    style D     fill:#f8f9fa,stroke:#adb5bd
+    style F     fill:#f8f9fa,stroke:#adb5bd
+```
+
 ## Artifacts
 
 All output is written to `.omc/playbook/` (or `.context/playbook/` if `.omc/` doesn't exist):
