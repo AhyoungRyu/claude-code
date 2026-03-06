@@ -185,8 +185,15 @@ After a run, if significant decisions were made, offer to append a summary to st
 
 ## Step D — Delegate runbook authoring to Codex
 
-Call:
+**If `oh-my-claudecode:omc-teams` is available** (OMC installed), delegate to Codex:
 - `/oh-my-claudecode:omc-teams 1:codex "<PROMPT>"`
+
+**If OMC is not installed**, author the runbook directly using the same template structure:
+- Read `.claude/skills/playbook/templates/codex_runbook_prompt.md` for the prompt template
+- Fill in all `{{PLACEHOLDERS}}` with the actual values
+- Write the runbook yourself, following all the same constraints and phase templates
+
+Either path produces the same artifact: a complete runbook written to `$PLAYBOOK_DIR/work.md`.
 
 Use the template at `.claude/skills/playbook/templates/codex_runbook_prompt.md`, substituting:
 - `{{USER_MESSAGE}}` — the user's raw goal (verbatim, post-clarification)

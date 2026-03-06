@@ -18,9 +18,14 @@ cp -r skills/playbook ~/.claude/skills/
 
 ## Dependencies
 
-Playbook delegates runbook authoring to Codex via `oh-my-claudecode:omc-teams`. This requires [oh-my-claudecode](https://github.com/AhyoungRyu/claude-code) installed with the `omc-teams` skill available.
+**OMC is optional.** Playbook works in two modes:
 
-During execution, playbook invokes whatever skills are listed in your `skills_snapshot.md` — those are resolved at runtime from your local `~/.claude/skills/` directory.
+| Mode | Runbook authoring | Requirement |
+|------|-------------------|-------------|
+| With OMC | Delegates to Codex via `oh-my-claudecode:omc-teams` for higher-quality runbooks | [oh-my-claudecode](https://github.com/AhyoungRyu/claude-code) installed |
+| Without OMC | Claude authors the runbook directly using the same template | Plain Claude Code, no extras |
+
+During execution, playbook invokes whatever skills are listed in your `skills_snapshot.md` — resolved at runtime from your local `~/.claude/skills/` directory.
 
 ## Usage
 
