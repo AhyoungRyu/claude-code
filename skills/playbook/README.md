@@ -59,16 +59,20 @@ flowchart TD
     A --> B["Step B - Determine constraints"]
     B --> C["Step C - Scan skills, write skills_snapshot.md"]
 
-    C --> C2{"steering.md exists?"}
+    C --> CG{"snapshot non-empty?"}
+    CG -->|No| CERR["STOP: scan failed - report error"]
+    CG -->|Yes| C2
+
+    C2{"steering.md exists?"}
     C2 -->|Yes| C2R["read + inject steering.md"]
     C2 -->|No| D
     C2R --> D
 
-    subgraph D["Step D - Author runbook"]
+    subgraph D["Step D - Author runbook via Codex or Claude"]
         DA{"OMC available?"}
         DA -->|omc-teams| DB["Codex writes runbook"]
         DA -->|no OMC| DC["Claude writes runbook"]
-        DB & DC --> DD["writes work.md"]
+        DB & DC --> DD["writes work.md with Skill Orchestration table"]
     end
 
     D --> E["Step E - Materialize work.md"]
@@ -77,30 +81,48 @@ flowchart TD
     ISSUE -->|No| CT
 
     CT{"Code task?"}
-    CT -->|Yes| E2["Step E2 - writes plan.md"]
+    CT -->|Yes| E2["Step E2 - write plan.md"]
     CT -->|No| F
 
-    E2 --> F
+    E2 --> E2G{"plan.md non-empty AND references at least 1 skill?"}
+    E2G -->|No| E2ERR["STOP: write complete plan.md before touching source"]
+    E2G -->|Yes| F
 
     subgraph F["Step F - Execute runbook"]
-        FA["invoke skills/agents from snapshot"]
-        FA --> FB{"Critical gate?"}
+        FA["invoke each skill via Skill tool / each agent via Agent tool"]
+        FA --> FB{"Critical gate triggered?"}
         FB -->|Yes| STOP2["ask user"]
         FB -->|No| FC["continue phases"]
-        FC --> FD["writes result.md"]
+        FC --> FRD["write result.md"]
+        FRD --> FDG{"result.md on disk?"}
+        FDG -->|No| FDR["write result.md now"]
+        FDG -->|Yes| FD2["present summary"]
+        FDR --> FD2
     end
 
-    F --> DONE(["Present summary to user"])
+    F --> DONE(["Done"])
 
     style START fill:#1a73e8,stroke:#0d6efd,color:#ffffff
     style DONE  fill:#198754,stroke:#157a47,color:#ffffff
     style STOP1 fill:#e65c00,stroke:#c94f00,color:#ffffff
     style STOP2 fill:#e65c00,stroke:#c94f00,color:#ffffff
+    style CERR  fill:#dc3545,stroke:#b02a37,color:#ffffff
+    style E2ERR fill:#dc3545,stroke:#b02a37,color:#ffffff
     style S0    fill:#3a3a3a,stroke:#777777,color:#aaaaaa
     style R     fill:#2d2d2d,stroke:#666666,color:#ffffff
     style D     fill:#2d2d2d,stroke:#666666,color:#ffffff
     style F     fill:#2d2d2d,stroke:#666666,color:#ffffff
 ```
+
+## Common failure modes
+
+| Symptom | Root cause | Fix in SKILL.md |
+|---------|-----------|-----------------|
+| `work.md` stays as placeholder after run | Step D was skipped — Codex/Claude never wrote the runbook | Step D now mandatory; both OMC and non-OMC paths produce `work.md` |
+| `plan.md` is thin / missing skill mapping table | Step E2 ran but wrote prose instead of the required structure | Step E2 hard gate: `plan.md` must be non-empty and reference ≥1 skill before Step F starts |
+| Skills listed in `skills_snapshot.md` but never actually called | Step F mentioned skills in text but didn't invoke them as tools | Step F enforcement: file-based skills → `Skill` tool; OMC agents → `Agent` tool — not inline text |
+| `skills_snapshot.md` is empty | `scan-skills.sh` failed silently | Step C non-empty check: if snapshot has no table rows, stop and report before proceeding |
+| `result.md` never written | Step F completed but skipped the mandatory result gate | Step F now has explicit disk-check before presenting summary to user |
 
 ## Artifacts
 
