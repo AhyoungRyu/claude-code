@@ -203,6 +203,14 @@ Use the template at `.claude/skills/playbook/templates/codex_runbook_prompt.md`,
 - `{{SKILLS_SNAPSHOT_OR_TOP_LIST}}` — skills snapshot from Step C (condense if too large)
 - `{{STEERING_CONTEXT}}` — steering.md content from Step C2, or `(none)` if absent
 
+**To generate the filled prompt automatically**, run:
+```bash
+bash ~/.claude/skills/playbook/scripts/build-codex-prompt.sh \
+  '<user_message>' '<task_type>' '<phase_template>' '<constraints>'
+```
+This outputs the filled prompt to `$PLAYBOOK_DIR/codex_prompt.txt` and auto-loads `steering.md`.
+All 6 placeholders are substituted. Pass the prompt content to Codex via `/oh-my-claudecode:omc-teams`.
+
 The runbook Codex produces MUST satisfy:
 - Matches the task type — do NOT apply code gates (test/build/API surface) to non-code tasks.
 - Includes only phases relevant to the task type.
@@ -264,6 +272,11 @@ Do NOT start modifying source files until plan.md exists on disk.
 ---
 
 ## Step F — Execute autonomously (stop only on critical gates)
+
+**Mandatory: invoke tools, do not inline.** Before executing each runbook step, check its skill mapping from `plan.md`:
+- File-based skill (e.g. `/playbook`, `/senior-frontend`) → invoke via **`Skill` tool**
+- OMC agent (e.g. `oh-my-claudecode:executor`) → invoke via **`Agent` tool**
+- Never describe what a skill/agent would do and then do it yourself inline. Actually call the tool.
 
 **Default: execute the runbook without interruption.** Do not ask for confirmation between phases.
 
