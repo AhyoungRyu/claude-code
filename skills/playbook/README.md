@@ -47,16 +47,17 @@ Examples:
 flowchart TD
     START(["/playbook goal"]) --> R
 
-    subgraph R["Step R - Reset and detect"]
+    subgraph R["Step R - Reset artifacts"]
         R1{".omc/ exists?"}
         R1 -->|Yes| R2[".omc/playbook"]
         R1 -->|No| R3[".context/playbook"]
         R2 & R3 --> R4["init work.md, result.md, plan.md"]
     end
 
-    R --> A["Step A - Classify task type"]
-
-    A --> C["Step C - Scan skills, write skills_snapshot.md"]
+    R --> S0["Step 0 - Clarify (almost always skipped)"]
+    S0 --> A["Step A - Classify task type"]
+    A --> B["Step B - Determine constraints"]
+    B --> C["Step C - Scan skills, write skills_snapshot.md"]
 
     C --> C2{"steering.md exists?"}
     C2 -->|Yes| C2R["read + inject steering.md"]
@@ -70,7 +71,8 @@ flowchart TD
         DB & DC --> DD["writes work.md"]
     end
 
-    D --> ISSUE{"issues in Consistency Check?"}
+    D --> E["Step E - Materialize work.md"]
+    E --> ISSUE{"issues in Consistency Check?"}
     ISSUE -->|Yes| STOP1["surface issues, wait for user"]
     ISSUE -->|No| CT
 
@@ -94,6 +96,7 @@ flowchart TD
     style DONE  fill:#198754,stroke:#157a47,color:#ffffff
     style STOP1 fill:#e65c00,stroke:#c94f00,color:#ffffff
     style STOP2 fill:#e65c00,stroke:#c94f00,color:#ffffff
+    style S0    fill:#3a3a3a,stroke:#777777,color:#aaaaaa
     style R     fill:#2d2d2d,stroke:#666666,color:#ffffff
     style D     fill:#2d2d2d,stroke:#666666,color:#ffffff
     style F     fill:#2d2d2d,stroke:#666666,color:#ffffff
