@@ -170,6 +170,86 @@ replaced `any` with `User` interface type.
 none
 ```
 
+### Example: `plan.md`
+
+```markdown
+# plan.md
+Run: 2026-03-06T10:42:30+09:00
+Task type: code-change
+
+## Files to modify
+- src/components/UserCard.tsx — fix type error on line 42 (replace `any` with `User`)
+- src/types/user.ts — verify `User` interface is exported
+
+## Change rationale
+The `any` type suppresses TypeScript's type safety. The `User` interface already exists
+in `src/types/user.ts` and covers all properties accessed on line 42.
+
+## Skill mapping
+- Step 1 (locate component): direct implementation — simple file read
+- Step 2 (apply type fix): oh-my-claudecode:executor — targeted code edit
+- Step 3 (run type check): direct implementation — shell command
+
+## Test / build gates
+- pnpm tsc --noEmit
+- pnpm test --run
+```
+
+### Example: `skills_snapshot.md`
+
+```markdown
+# Skills Snapshot
+Generated: 2026-03-06T10:42:10+09:00
+
+## File-based skills (slash commands)
+
+| Command | Description |
+|---------|-------------|
+| /playbook | Turn any natural-language goal into a structured, executable runbook |
+| /senior-frontend | Comprehensive frontend development with React, Next.js, TypeScript, Tailwind |
+| /review-pr | Comprehensive PR review using parallel specialist agents |
+| /webapp-testing | Browser-based UI testing and verification using Playwright |
+
+## OMC built-in agents
+
+| Agent | Role |
+|-------|------|
+| oh-my-claudecode:executor | Code implementation, refactoring, feature work |
+| oh-my-claudecode:explore | Internal codebase discovery, symbol/file mapping |
+| oh-my-claudecode:debugger | Root-cause analysis, regression isolation |
+| oh-my-claudecode:verifier | Completion evidence, claim validation, test adequacy |
+| oh-my-claudecode:build-fix | Build/toolchain/type error resolution |
+| oh-my-claudecode:test-engineer | Test strategy, coverage, flaky-test hardening |
+```
+
+### Example: `baseline.md`
+
+```markdown
+# baseline.md
+Run: 2026-03-06T10:42:05+09:00
+Task type: code-change
+
+## Test baseline
+pnpm test --run
+
+PASS  src/components/UserCard.test.tsx (12 tests)
+PASS  src/hooks/useUser.test.ts (8 tests)
+Tests: 331 passed, 0 failed
+
+## Build baseline
+pnpm build
+
+dist/index.js   68.73 kB (gzip: 21.4 kB)
+Build: success, no errors, no warnings
+
+## Type check baseline
+pnpm tsc --noEmit
+
+src/components/UserCard.tsx:42:14 - error TS2345:
+  Argument of type 'any' is not assignable to parameter of type 'User'.
+1 error
+```
+
 ### Example: `steering.md`
 
 ```markdown
