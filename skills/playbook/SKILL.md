@@ -16,14 +16,14 @@ Given the user's goal (any type), you will:
 1) **Reset run artifacts** (Step R) — overwrite work.md, result.md, plan.md with a timestamped header.
 2) Classify the task type to select the appropriate phase template and constraints.
 3) Snapshot all available Claude Code skills by scanning standard skill directories (do NOT rely on `/skills`).
-4) Load persistent steering context from `.omc/spec-forge/steering.md` if it exists.
+4) Load persistent steering context from `.omc/playbook/steering.md` if it exists.
 5) Delegate to Codex (via `/oh-my-claudecode:omc-teams 1:codex`) to produce a high-quality runbook:
    - The runbook must match the detected task type (not always code-focused).
    - The runbook must be generic and repo-aware (detect available scripts/commands; do not assume).
    - The runbook must maximize correct use of available skills.
    - The runbook must include a cross-phase consistency check section.
-6) Save the runbook to `.omc/spec-forge/work.md`.
-7) For code tasks (`code-change`, `refactor`, `code-cleanup`): extract the Plan phase to `.omc/spec-forge/plan.md` BEFORE any implementation starts.
+6) Save the runbook to `.omc/playbook/work.md`.
+7) For code tasks (`code-change`, `refactor`, `code-cleanup`): extract the Plan phase to `.omc/playbook/plan.md` BEFORE any implementation starts.
 8) Execute immediately unless a critical gate is triggered (see Step F).
 
 ---
@@ -33,14 +33,19 @@ Given the user's goal (any type), you will:
 Before any classification or planning, initialize this run's artifacts with fresh headers:
 
 ```bash
-mkdir -p .omc/spec-forge
+if [ -d ".omc" ]; then
+  PLAYBOOK_DIR=".omc/playbook"
+else
+  PLAYBOOK_DIR=".context/playbook"
+fi
+mkdir -p "$PLAYBOOK_DIR"
 RUN_TS=$(date -Iseconds)
-printf "# work.md\nRun: %s\n\n*(runbook will be written here)*\n" "$RUN_TS" > .omc/spec-forge/work.md
-printf "# result.md\nRun: %s\n\n*(run summary will be written here after execution)*\n" "$RUN_TS" > .omc/spec-forge/result.md
-printf "# plan.md\nRun: %s\n\n*(plan will be written here before execution)*\n" "$RUN_TS" > .omc/spec-forge/plan.md
+printf "# work.md\nRun: %s\n\n*(runbook will be written here)*\n" "$RUN_TS" > "$PLAYBOOK_DIR/work.md"
+printf "# result.md\nRun: %s\n\n*(run summary will be written here after execution)*\n" "$RUN_TS" > "$PLAYBOOK_DIR/result.md"
+printf "# plan.md\nRun: %s\n\n*(plan will be written here before execution)*\n" "$RUN_TS" > "$PLAYBOOK_DIR/plan.md"
 ```
 
-**Why**: Each invocation is a fresh run. Stale content from previous iterations must never bleed into the current runbook or be mistaken for current-run output. The timestamp header makes it trivially clear which run produced each file.
+**Why**: `$PLAYBOOK_DIR` is `.omc/playbook` when `.omc/` exists (OMC users), or `.context/playbook` otherwise — so playbook works with or without OMC. Each invocation is a fresh run. Stale content from previous iterations must never bleed into the current runbook or be mistaken for current-run output. The timestamp header makes it trivially clear which run produced each file.
 
 ---
 
@@ -97,7 +102,7 @@ Record the chosen type (and secondary type if mixed) at the top of the runbook.
 
 **All tasks:**
 - Minimal scope: do only what was asked, no extras.
-- Produce trace artifacts under `.omc/spec-forge/`.
+- Produce trace artifacts under `.omc/playbook/`.
 
 **`code-change` only:**
 - No `any`, no `as any`, no `ts-ignore`.
@@ -137,14 +142,14 @@ Record the chosen type (and secondary type if mixed) at the top of the runbook.
 
 ## Step C — Skills snapshot (deterministic)
 
-Run the scan script to generate `.omc/spec-forge/skills_snapshot.md`:
+Run the scan script to generate `.omc/playbook/skills_snapshot.md`:
 
 ```bash
-bash ~/.claude/skills/playbook/scripts/scan-skills.sh .omc/spec-forge/skills_snapshot.md
+bash ~/.claude/skills/playbook/scripts/scan-skills.sh "$PLAYBOOK_DIR/skills_snapshot.md"
 ```
 
 The snapshot produces two sections:
-1. **File-based skills** — slash commands derived from each `SKILL.md`'s `name:` field (e.g. `/spec-forge`, `/senior-frontend`)
+1. **File-based skills** — slash commands derived from each `SKILL.md`'s `name:` field (e.g. `/playbook`, `/senior-frontend`)
 2. **OMC built-in agents** — the `oh-my-claudecode:*` agent catalog (e.g. `oh-my-claudecode:executor`)
 
 **Enforcement gates (do not skip):**
@@ -162,7 +167,7 @@ The snapshot produces two sections:
 
 ## Step C2 — Load Steering Context
 
-Check if `.omc/spec-forge/steering.md` exists in the current repo.
+Check if `.omc/playbook/steering.md` exists in the current repo.
 
 - **If it exists:** read the full content. This will be injected into the Codex prompt as `STEERING CONTEXT`.
 - **If it doesn't exist:** skip — no steering context will be passed.
@@ -171,9 +176,9 @@ Steering captures persistent project-level knowledge that should constrain every
 - Architecture decisions already made (e.g. "we use Zustand, not Redux")
 - Prohibited patterns (e.g. "never use barrel imports")
 - Naming conventions and folder structure rules
-- Outcomes from past spec-forge runs worth remembering
+- Outcomes from past playbook runs worth remembering
 
-Users can edit `.omc/spec-forge/steering.md` directly at any time.
+Users can edit `.omc/playbook/steering.md` directly at any time.
 After a run, if significant decisions were made, offer to append a summary to steering.md.
 
 ---
@@ -183,7 +188,7 @@ After a run, if significant decisions were made, offer to append a summary to st
 Call:
 - `/oh-my-claudecode:omc-teams 1:codex "<PROMPT>"`
 
-Use the template at `.claude/skills/spec-forge/templates/codex_runbook_prompt.md`, substituting:
+Use the template at `.claude/skills/playbook/templates/codex_runbook_prompt.md`, substituting:
 - `{{USER_MESSAGE}}` — the user's raw goal (verbatim, post-clarification)
 - `{{TASK_TYPE}}` — classified type + secondary type if mixed
 - `{{PHASE_TEMPLATE}}` — the matching phase template from Step A
@@ -197,7 +202,7 @@ The runbook Codex produces MUST satisfy:
 - For mixed types, includes phases and constraints from both types.
 - Includes a **"Skill Orchestration"** section: maps each step to a specific skill from the snapshot; uses only skills that actually exist; prefers fewer skills if they cover the need.
 - Is repo-agnostic: may inspect package.json scripts; must NOT assume specific workspace names.
-- Creates trace artifacts under `.omc/spec-forge/`: `baseline.md` (if applicable), `plan.md`, `result.md`.
+- Creates trace artifacts under `.omc/playbook/`: `baseline.md` (if applicable), `plan.md`, `result.md`.
 - Includes a **"Consistency Check"** section at the end (see Step D2).
 - Scales complexity to the task: simple file-ops → concise runbook; complex code-change → full runbook.
 
@@ -219,7 +224,7 @@ If any issue is found, the runbook must note it inline as `⚠️ ISSUE: <descri
 
 ## Step E — Materialize
 
-Write Codex output to `.omc/spec-forge/work.md` exactly.
+Write Codex output to `.omc/playbook/work.md` exactly.
 
 If the Consistency Check section contains any `⚠️ ISSUE:` entries:
 - Surface them to the user.
@@ -235,7 +240,7 @@ If no issues: proceed to Step E2 immediately without asking.
 **Applies to: `code-change`, `refactor`, `code-cleanup` tasks.**
 For other task types (research, docs, planning, file-ops, config): skip this step, proceed to Step F.
 
-Extract the Plan phase from `work.md` and write it to `.omc/spec-forge/plan.md` **before any code is touched**.
+Extract the Plan phase from `work.md` and write it to `.omc/playbook/plan.md` **before any code is touched**.
 
 `plan.md` MUST include:
 1. **Files to modify** — list each file path and the nature of change
@@ -245,7 +250,7 @@ Extract the Plan phase from `work.md` and write it to `.omc/spec-forge/plan.md` 
    - If no skill applies to a step, explicitly note "direct implementation" with one-line justification
 4. **Test/build gates** — which commands will be run after implementation to prove correctness
 
-**Hard gate**: `.omc/spec-forge/plan.md` MUST be written and non-empty before Step F begins.
+**Hard gate**: `.omc/playbook/plan.md` MUST be written and non-empty before Step F begins.
 The plan.md must reference at least one skill from `skills_snapshot.md` by name.
 Do NOT start modifying source files until plan.md exists on disk.
 
@@ -269,7 +274,7 @@ For all other situations — including ambiguous task types, multiple valid appr
 
 **Mandatory result.md gate — write this before declaring completion:**
 
-Write the run summary to `.omc/spec-forge/result.md` (overwrite), containing:
+Write the run summary to `.omc/playbook/result.md` (overwrite), containing:
 
 ```markdown
 # result.md
@@ -283,7 +288,7 @@ Task type: <classified type>
 <list each by exact slash-command / agent name, or "none" for research tasks>
 
 ## Artifacts produced
-<list of files written under .omc/spec-forge/>
+<list of files written under .omc/playbook/>
 
 ## Risks / TODOs
 <any open items, or "none">
@@ -298,15 +303,15 @@ Then present a brief summary to the user (what changed, artifacts produced, any 
 ## Output directory (MANDATORY)
 
 Write ALL artifacts under:
-- `.omc/spec-forge/`
+- `.omc/playbook/`
 
 Expected artifacts:
-- `.omc/spec-forge/skills_snapshot.md`
-- `.omc/spec-forge/steering.md` (persistent across runs; user-managed)
-- `.omc/spec-forge/work.md`
-- `.omc/spec-forge/baseline.md` (if applicable)
-- `.omc/spec-forge/plan.md` ← **REQUIRED before execution for code-change / refactor / code-cleanup**
-- `.omc/spec-forge/result.md` ← **REQUIRED at end of every run**
+- `.omc/playbook/skills_snapshot.md`
+- `.omc/playbook/steering.md` (persistent across runs; user-managed)
+- `.omc/playbook/work.md`
+- `.omc/playbook/baseline.md` (if applicable)
+- `.omc/playbook/plan.md` ← **REQUIRED before execution for code-change / refactor / code-cleanup**
+- `.omc/playbook/result.md` ← **REQUIRED at end of every run**
 
 Do NOT write to `docs/` or `.ai/`.
 
@@ -322,5 +327,5 @@ Do NOT write to `docs/` or `.ai/`.
 - Consistency Check passes (no `⚠️ ISSUE:` entries), or issues are surfaced and resolved.
 - **For code tasks: `plan.md` is written to disk BEFORE the first source file is touched.**
 - **Skills from `skills_snapshot.md` are referenced by exact name in `work.md` and `plan.md` — and actually invoked via `Skill`/`Agent` tool during Step F execution (not just mentioned in text).**
-- `.omc/spec-forge/result.md` is written and non-empty at the end of every run (verifiable on disk).
-- `.omc/spec-forge/work.md` contains the current run's timestamp (not a stale previous run's content).
+- `.omc/playbook/result.md` is written and non-empty at the end of every run (verifiable on disk).
+- `.omc/playbook/work.md` contains the current run's timestamp (not a stale previous run's content).

@@ -8,7 +8,7 @@ Turn any natural-language goal into a structured, executable runbook.
 2. Snapshots all available Claude Code skills and OMC agents
 3. Delegates runbook authoring to Codex with task-appropriate phases and constraints
 4. Executes autonomously — stops only on critical gates (irreversible actions, unexpected scope, failing baseline)
-5. Writes trace artifacts to `.omc/spec-forge/` (work.md, plan.md, result.md)
+5. Writes trace artifacts to `.omc/playbook/` or `.context/playbook/` (work.md, plan.md, result.md)
 
 ## Install
 
@@ -32,7 +32,7 @@ Examples:
 
 ## Artifacts
 
-All output is written to `.omc/spec-forge/` in your project:
+All output is written to `.omc/playbook/` (or `.context/playbook/` if `.omc/` doesn't exist):
 
 | File | Description |
 |------|-------------|
@@ -44,7 +44,7 @@ All output is written to `.omc/spec-forge/` in your project:
 
 ## Steering context
 
-Create `.omc/spec-forge/steering.md` in your repo to inject persistent constraints into every runbook:
+Create `.omc/playbook/steering.md` (or `.context/playbook/steering.md`) in your repo to inject persistent constraints into every runbook:
 
 ```markdown
 # Steering

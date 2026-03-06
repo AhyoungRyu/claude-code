@@ -25,7 +25,7 @@ STEERING CONTEXT (persistent project-level decisions — treat as hard constrain
 
 OUTPUT REQUIREMENTS (STRICT):
 - Output ONLY a single Markdown runbook that will be saved to:
-  `.omc/spec-forge/work.md`
+  `.omc/playbook/work.md`
 
 - The runbook MUST start with a header block:
   ```
@@ -39,7 +39,7 @@ OUTPUT REQUIREMENTS (STRICT):
   - You may instruct to inspect package.json scripts to choose commands.
   - Prefer pnpm if the user requested; otherwise choose repo-appropriate.
 
-- The runbook MUST create and maintain these trace artifacts under `.omc/spec-forge/`:
+- The runbook MUST create and maintain these trace artifacts under `.omc/playbook/`:
   - `baseline.md` (if baseline gate exists for the task type)
   - `plan.md` — **for code tasks (code-change, refactor, code-cleanup) this MUST be a standalone section
     with a `## Plan` header so it can be extracted verbatim into the plan.md file**
@@ -54,7 +54,7 @@ OUTPUT REQUIREMENTS (STRICT):
      - If no skill matches a step, write "direct implementation" and explain why
   4. **Gates** — the exact build/test commands to run after implementation
 
-  The plan section is extracted directly to `.omc/spec-forge/plan.md` before execution begins.
+  The plan section is extracted directly to `.omc/playbook/plan.md` before execution begins.
   It must be complete and self-contained — no forward references to other runbook sections.
 
 - The runbook MUST include a "Skill Orchestration" section:

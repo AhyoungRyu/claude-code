@@ -7,10 +7,14 @@ if [ -z "$USER_MESSAGE" ]; then
   exit 1
 fi
 
-OUT_DIR=".omc/spec-forge"
+if [ -d ".omc" ]; then
+  OUT_DIR=".omc/playbook"
+else
+  OUT_DIR=".context/playbook"
+fi
 mkdir -p "$OUT_DIR"
 
-TEMPLATE="${HOME}/.claude/skills/spec-forge/templates/codex_runbook_prompt.md"
+TEMPLATE="${HOME}/.claude/skills/playbook/templates/codex_runbook_prompt.md"
 SKILLS_SNAPSHOT="${OUT_DIR}/skills_snapshot.md"
 OUT_PROMPT="${OUT_DIR}/codex_prompt.txt"
 

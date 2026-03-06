@@ -4,7 +4,7 @@
 # Usage: scan-skills.sh [output-path]
 set -euo pipefail
 
-OUT="${1:-.omc/spec-forge/skills_snapshot.md}"
+OUT="${1:-.omc/playbook/skills_snapshot.md}"
 mkdir -p "$(dirname "$OUT")"
 
 {
