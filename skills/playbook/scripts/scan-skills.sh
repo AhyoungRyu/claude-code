@@ -17,6 +17,33 @@ mkdir -p "$(dirname "$OUT")"
   echo "|---------------|-------------|"
 } > "$OUT"
 
+extract_desc() {
+  local FILE="$1"
+  # Try inline value first (description: some text)
+  local desc
+  desc=$(grep -m1 '^description:' "$FILE" 2>/dev/null \
+    | sed 's/^description:[[:space:]]*//' \
+    | sed 's/^[>|][[:space:]]*//' \
+    | tr -d '"' \
+    | tr -d "'" \
+    | cut -c1-80)
+  # If empty or was a block scalar marker, grab next non-empty indented line
+  if [ -z "$desc" ]; then
+    desc=$(awk '
+      /^description:[[:space:]]*(>|\||-)?[[:space:]]*$/ { found=1; next }
+      found && /^[[:space:]]+[^[:space:]]/ {
+        gsub(/^[[:space:]]+/, "")
+        # strip leading quotes
+        gsub(/^["'"'"']/, "")
+        print substr($0, 1, 80)
+        exit
+      }
+      found && /^[^[:space:]]/ { exit }
+    ' "$FILE" 2>/dev/null)
+  fi
+  echo "${desc:-(no description)}"
+}
+
 emit_skill() {
   local FILE="$1"
 
@@ -28,14 +55,8 @@ emit_skill() {
     | tr -d '[:space:]')
   [ -z "$name" ] && name="$(basename "$(dirname "$FILE")")"
 
-  # Extract description: first inline value; strip block-scalar `>`, quotes
   local desc
-  desc=$(grep -m1 '^description:' "$FILE" 2>/dev/null \
-    | sed 's/^description:[[:space:]]*//' \
-    | sed 's/^>[[:space:]]*//' \
-    | tr -d '"' \
-    | cut -c1-80)
-  [ -z "$desc" ] && desc="(no description)"
+  desc=$(extract_desc "$FILE")
 
   echo "| \`/${name}\` | ${desc} |" >> "$OUT"
 }
@@ -65,12 +86,7 @@ if [ -d "$AGENTS_DIR" ]; then
       | tr -d '[:space:]')
     [ -z "$local_name" ] && local_name="$(basename "$f" .md)"
 
-    local_desc=$(grep -m1 '^description:' "$f" 2>/dev/null \
-      | sed 's/^description:[[:space:]]*//' \
-      | sed 's/^>[[:space:]]*//' \
-      | tr -d '"' \
-      | cut -c1-80)
-    [ -z "$local_desc" ] && local_desc="(no description)"
+    local_desc=$(extract_desc "$f")
 
     echo "| \`${local_name}\` | ${local_desc} |" >> "$OUT"
   done < <(find "$AGENTS_DIR" -maxdepth 1 -name "*.md" | sort)
