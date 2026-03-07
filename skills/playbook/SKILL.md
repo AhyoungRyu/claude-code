@@ -5,10 +5,12 @@ description: >
   Classifies the task type first (code-change, code-cleanup, refactor, file-ops, research, config, docs, planning),
   then delegates to Codex to produce a phase-appropriate runbook with matching gates and constraints,
   optimized to use the user's available Claude Code skills.
-allowed-tools: Bash
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Skill
 ---
 
 # playbook (user-level)
+
+> **CRITICAL EXECUTION RULE**: You MUST complete ALL steps (R → A → B → C → C2 → D → E → E2 → F) in sequence during every invocation. Do NOT skip steps. Do NOT abandon the playbook workflow to work on the user's task directly. The user's task is executed IN Step F as part of the runbook — never outside the playbook flow. If you reset artifacts (Step R) but fail to complete subsequent steps, the playbook run is broken.
 
 ## What you do
 Given the user's goal (any type), you will:
@@ -183,17 +185,18 @@ After a run, if significant decisions were made, offer to append a summary to st
 
 ---
 
-## Step D — Delegate runbook authoring to Codex
+## Step D — Author the runbook
 
-**If `oh-my-claudecode:omc-teams` is available** (OMC installed), delegate to Codex:
+**Primary path — Codex delegation** (when `oh-my-claudecode:omc-teams` is available):
 - `/oh-my-claudecode:omc-teams 1:codex "<PROMPT>"`
 
-**If OMC is not installed**, author the runbook directly using the same template structure:
-- Read `.claude/skills/playbook/templates/codex_runbook_prompt.md` for the prompt template
-- Fill in all `{{PLACEHOLDERS}}` with the actual values
-- Write the runbook yourself, following all the same constraints and phase templates
+**Fallback path — Claude authors directly** (when OMC is not installed, OR when Codex delegation fails for any reason such as MCP errors, quota limits, tool unavailability):
+1. Read the prompt template: `~/.claude/skills/playbook/templates/codex_runbook_prompt.md`
+2. Fill in all `{{PLACEHOLDERS}}` with actual values from Steps A-C
+3. Write the complete runbook yourself, following all the same constraints and phase templates
+4. Use the **Write tool** to save to `$PLAYBOOK_DIR/work.md`
 
-Either path produces the same artifact: a complete runbook written to `$PLAYBOOK_DIR/work.md`.
+**IMPORTANT**: If the primary path fails, immediately fall back to the Claude-authors-directly path. Do NOT abandon the playbook workflow. Either path produces the same artifact: a complete runbook written to `$PLAYBOOK_DIR/work.md`.
 
 Use the template at `.claude/skills/playbook/templates/codex_runbook_prompt.md`, substituting:
 - `{{USER_MESSAGE}}` — the user's raw goal (verbatim, post-clarification)
@@ -239,7 +242,9 @@ If any issue is found, the runbook must note it inline as `⚠️ ISSUE: <descri
 
 ## Step E — Materialize
 
-Write Codex output to `$PLAYBOOK_DIR/work.md` exactly.
+Write the runbook to `$PLAYBOOK_DIR/work.md` using the **Write tool** (or Bash printf/redirect). The file MUST contain the full runbook — not the placeholder from Step R.
+
+**Verification gate**: After writing, confirm `work.md` no longer contains `*(runbook will be written here)*`. If it does, the write failed — retry.
 
 If the Consistency Check section contains any `⚠️ ISSUE:` entries:
 - Surface them to the user.
@@ -255,7 +260,9 @@ If no issues: proceed to Step E2 immediately without asking.
 **Applies to: `code-change`, `refactor`, `code-cleanup` tasks.**
 For other task types (research, docs, planning, file-ops, config): skip this step, proceed to Step F.
 
-Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` **before any code is touched**.
+Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` using the **Write tool** (or Bash printf/redirect) **before any code is touched**.
+
+**Verification gate**: After writing, confirm `plan.md` no longer contains `*(plan will be written here before execution)*`. If it does, the write failed — retry.
 
 `plan.md` MUST include:
 1. **Files to modify** — list each file path and the nature of change
@@ -294,7 +301,7 @@ For all other situations — including ambiguous task types, multiple valid appr
 
 **Mandatory result.md gate — write this before declaring completion:**
 
-Write the run summary to `$PLAYBOOK_DIR/result.md` (overwrite), containing:
+Write the run summary to `$PLAYBOOK_DIR/result.md` using the **Write tool** (or Bash printf/redirect), containing:
 
 ```markdown
 # result.md
@@ -348,3 +355,13 @@ Do NOT write to `docs/` or `.ai/`.
 - **Skills from `skills_snapshot.md` are referenced by exact name in `work.md` and `plan.md` — and actually invoked via `Skill`/`Agent` tool during Step F execution (not just mentioned in text).**
 - `$PLAYBOOK_DIR/result.md` is written and non-empty at the end of every run (verifiable on disk).
 - `$PLAYBOOK_DIR/work.md` contains the current run's timestamp (not a stale previous run's content).
+
+## Final completion checkpoint
+
+Before presenting the summary to the user, verify ALL of these are true:
+1. `$PLAYBOOK_DIR/skills_snapshot.md` — exists and has the current run's timestamp
+2. `$PLAYBOOK_DIR/work.md` — contains the full runbook (NOT the Step R placeholder)
+3. `$PLAYBOOK_DIR/plan.md` — contains the plan (for code tasks) OR is at least updated with findings (for non-code tasks)
+4. `$PLAYBOOK_DIR/result.md` — contains the run summary (NOT the Step R placeholder)
+
+If ANY file still contains its Step R placeholder text, the playbook run is incomplete. Go back and complete the missing steps.
