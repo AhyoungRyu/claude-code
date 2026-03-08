@@ -255,10 +255,11 @@ If no issues: proceed to Step E2 immediately without asking.
 
 ---
 
-## Step E2 — Write plan.md before execution (code tasks only)
+## Step E2 — Write plan.md before execution
 
-**Applies to: `code-change`, `refactor`, `code-cleanup` tasks.**
-For other task types (research, docs, planning, file-ops, config): skip this step, proceed to Step F.
+**Two sub-paths depending on task type:**
+
+### E2a — Code tasks (`code-change`, `refactor`, `code-cleanup`)
 
 Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` using the **Write tool** (or Bash printf/redirect) **before any code is touched**.
 
@@ -275,6 +276,18 @@ Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` us
 **Hard gate**: `$PLAYBOOK_DIR/plan.md` MUST be written and non-empty before Step F begins.
 The plan.md must reference at least one skill from `skills_snapshot.md` by name.
 Do NOT start modifying source files until plan.md exists on disk.
+
+### E2b — Non-code tasks (research, docs, planning, file-ops, config)
+
+Write a brief findings/context summary to `$PLAYBOOK_DIR/plan.md` using the **Write tool** (or Bash printf/redirect). Replace the Step R placeholder with:
+1. **Task type and scope** — what was classified and what is in scope
+2. **Key findings so far** — what Context/Analyze/Inventory phases discovered
+3. **Constraints applied** — which Step B constraints are relevant
+4. **Skill mapping** — which skills will be used in Step F
+
+**Verification gate**: After writing, confirm `plan.md` no longer contains `*(plan will be written here before execution)*`. If it does, the write failed — retry.
+
+This ensures plan.md is always a useful run artifact, even when no code is changed.
 
 ---
 
