@@ -7,6 +7,19 @@ set -euo pipefail
 OUT="${1:-.omc/playbook/skills_snapshot.md}"
 mkdir -p "$(dirname "$OUT")"
 
+# Cache check: if snapshot exists and no SKILL.md is newer than it (and this
+# script hasn't changed), skip regeneration.
+if [ -f "$OUT" ]; then
+  _script_changed=false
+  [ "$0" -nt "$OUT" ] 2>/dev/null && _script_changed=true || true
+  _newer_skill=$(find "$HOME/.claude/skills" ".claude/skills" -name "SKILL.md" \
+    -newer "$OUT" 2>/dev/null | head -1 || true)
+  if ! $_script_changed && [ -z "$_newer_skill" ]; then
+    echo "Skills snapshot up-to-date ($(basename "$OUT")), skipping scan." >&2
+    exit 0
+  fi
+fi
+
 {
   echo "# Skills Snapshot"
   echo "Generated: $(date -Iseconds)"
