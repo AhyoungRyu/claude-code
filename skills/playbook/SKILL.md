@@ -10,7 +10,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Skill
 
 # playbook (user-level)
 
-> **CRITICAL EXECUTION RULE**: You MUST complete ALL steps (R → A → B → C → C2 → D → E → E2 → F) in sequence during every invocation. Do NOT skip steps. Do NOT abandon the playbook workflow to work on the user's task directly. The user's task is executed IN Step F as part of the runbook — never outside the playbook flow. If you reset artifacts (Step R) but fail to complete subsequent steps, the playbook run is broken.
+> **CRITICAL EXECUTION RULE**: You MUST complete ALL steps (R → A → B → C → C2 → C3 → D → E → E2 → F) in sequence during every invocation. Do NOT skip steps. Do NOT abandon the playbook workflow to work on the user's task directly. The user's task is executed IN Step F as part of the runbook — never outside the playbook flow. If you reset artifacts (Step R) but fail to complete subsequent steps, the playbook run is broken.
 
 ## What you do
 Given the user's goal (any type), you will:
@@ -158,10 +158,10 @@ The snapshot produces two sections:
 
 1. **Non-empty check**: After running the script, verify the snapshot contains at least one `|` table row. If it is empty, the scan failed — stop and report the error before proceeding.
 
-2. **Step mapping rule**: Every step in `work.md` and `plan.md` MUST either:
-   - Name a skill/agent from the snapshot by its exact command, **or**
-   - State `"direct implementation — <one-line reason>"`.
-   No step may be left unmapped or vaguely attributed to "an agent".
+2. **Step mapping rule**: Every step in `work.md` and `plan.md` MUST name a skill/agent from the snapshot by its exact command.
+   - **MAXIMIZE skill usage**: assign a named skill or OMC agent to every step. `"direct implementation"` is a last resort, permitted ONLY when no skill in the snapshot is even remotely applicable AND the step is a single atomic shell command (e.g. `tsc --noEmit`).
+   - When using `"direct implementation"`, write: `"direct implementation — no applicable skill: <one-line reason>"`.
+   - No step may be left unmapped or vaguely attributed to "an agent".
 
 3. **Execution rule (Step F)**: When a runbook step is mapped to a skill, **invoke it using the `Skill` tool** (for file-based skills) or the **`Agent` tool** (for `oh-my-claudecode:*` agents). Do not inline what the skill would do — actually call it.
 
@@ -184,6 +184,40 @@ Users can edit `$PLAYBOOK_DIR/steering.md` directly at any time.
 After a run, if significant decisions were made, offer to append a summary to steering.md.
 
 ---
+
+## Step C3 — Codex / Gemini routing (mandatory for qualifying steps)
+
+Before writing the Skill Orchestration section (Step D), consult this routing table.
+When a runbook step matches a Codex or Gemini trigger, that external model MUST be used — it is not optional.
+
+**Codex routing** (`/oh-my-claudecode:ask-codex`, model: `gpt-5.4 xhigh`) — REQUIRED when a step involves:
+
+| Step type | Trigger keywords |
+|-----------|-----------------|
+| Architecture review | "review architecture", "system design", "module boundaries", "coupling" |
+| Planning validation | "validate plan", "critique plan", "review runbook", "sanity check" |
+| Security audit | "security", "auth", "trust boundary", "injection", "CVE", "permissions" |
+| Code review | "review code", "code quality", "anti-patterns", "technical debt" |
+| Test strategy | "test strategy", "coverage plan", "what to test", "test design" |
+| Critical analysis | "trade-offs", "options analysis", "risks", "compare approaches" |
+
+**Gemini routing** (`/oh-my-claudecode:ask-gemini`) — REQUIRED when a step involves:
+
+| Step type | Trigger keywords |
+|-----------|-----------------|
+| UI/UX review | "UI review", "UX audit", "accessibility", "visual design", "component layout" |
+| Documentation writing | "write docs", "update README", "migration guide", "API docs" |
+| Large-context analysis | >50 files in scope, or "scan entire codebase", "across all files" |
+| Visual analysis | screenshots, diagrams, Figma links, image inputs |
+
+**Team composition mandate**: When the runbook has 3 or more steps that can run independently (no data dependency), the Skill Orchestration section MUST use either:
+- `oh-my-claudecode:team` for coordinated multi-agent execution, OR
+- `/oh-my-claudecode:ultrawork` for maximum parallelism
+
+State the chosen team/parallel strategy explicitly in the Skill Orchestration section and list which steps run in parallel.
+
+---
+
 
 ## Step D — Author the runbook
 
@@ -218,7 +252,7 @@ The runbook Codex produces MUST satisfy:
 - Matches the task type — do NOT apply code gates (test/build/API surface) to non-code tasks.
 - Includes only phases relevant to the task type.
 - For mixed types, includes phases and constraints from both types.
-- Includes a **"Skill Orchestration"** section: maps each step to a specific skill from the snapshot; uses only skills that actually exist; prefers fewer skills if they cover the need.
+- Includes a **"Skill Orchestration"** section: maps each step to a specific skill from the snapshot; uses only skills that actually exist; **MAXIMIZES skill coverage** (every step MUST have a named skill — see Step C3 for Codex/Gemini routing and team composition rules).
 - Is repo-agnostic: may inspect package.json scripts; must NOT assume specific workspace names.
 - Creates trace artifacts under `$PLAYBOOK_DIR/`: `baseline.md` (if applicable), `plan.md`, `result.md`.
 - Includes a **"Consistency Check"** section at the end (see Step D2).
@@ -270,7 +304,9 @@ Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` us
 2. **Change rationale** — why each change is needed
 3. **Skill mapping** — for each implementation step, which skill from `skills_snapshot.md` will be used and why
    - Reference skills by their exact slash-command name (e.g. `/oh-my-claudecode:executor`)
-   - If no skill applies to a step, explicitly note "direct implementation" with one-line justification
+   - Apply Codex/Gemini routing from Step C3: architecture/review/security/test-strategy steps → `/oh-my-claudecode:ask-codex`; UI/docs/large-context steps → `/oh-my-claudecode:ask-gemini`
+   - If 3+ steps are independent, mandate `oh-my-claudecode:team` or `/oh-my-claudecode:ultrawork` in the skill mapping
+   - `"direct implementation"` is permitted ONLY when no skill applies AND the step is a single atomic shell command — state `"direct implementation — no applicable skill: <reason>"`
 4. **Test/build gates** — which commands will be run after implementation to prove correctness
 
 **Hard gate**: `$PLAYBOOK_DIR/plan.md` MUST be written and non-empty before Step F begins.
@@ -296,7 +332,10 @@ This ensures plan.md is always a useful run artifact, even when no code is chang
 **Mandatory: invoke tools, do not inline.** Before executing each runbook step, check its skill mapping from `plan.md`:
 - File-based skill (e.g. `/playbook`, `/senior-frontend`) → invoke via **`Skill` tool**
 - OMC agent (e.g. `oh-my-claudecode:executor`) → invoke via **`Agent` tool**
+- Codex step (`/oh-my-claudecode:ask-codex`) → invoke via **`Skill` tool**
+- Gemini step (`/oh-my-claudecode:ask-gemini`) → invoke via **`Skill` tool**
 - Never describe what a skill/agent would do and then do it yourself inline. Actually call the tool.
+- **`"direct implementation"` is a last resort**: before executing any step marked "direct implementation", verify: (a) you checked the skills snapshot and no skill applies, (b) the step is a single atomic shell command. If either check fails, re-map the step to the appropriate skill first.
 
 **Default: execute the runbook without interruption.** Do not ask for confirmation between phases.
 
@@ -365,7 +404,9 @@ Do NOT write to `docs/` or `.ai/`.
 - Generated runbook is complete and appropriate for the task type.
 - Consistency Check passes (no `⚠️ ISSUE:` entries), or issues are surfaced and resolved.
 - **For code tasks: `plan.md` is written to disk BEFORE the first source file is touched.**
-- **Skills from `skills_snapshot.md` are referenced by exact name in `work.md` and `plan.md` — and actually invoked via `Skill`/`Agent` tool during Step F execution (not just mentioned in text).**
+- **Skills from `skills_snapshot.md` are referenced by exact name in `work.md` and `plan.md` — and actually invoked via `Skill`/`Agent` tool during Step F execution (not just mentioned in text). `"direct implementation"` appears only for single atomic shell commands where no skill applies.**
+- **Codex and Gemini are used proactively**: any architecture/review/security/test-strategy step uses `/oh-my-claudecode:ask-codex`; any UI/docs/large-context step uses `/oh-my-claudecode:ask-gemini`. Neither is optional.
+- **Team composition**: any runbook with 3+ independent steps uses `oh-my-claudecode:team` or `/oh-my-claudecode:ultrawork`.
 - `$PLAYBOOK_DIR/result.md` is written and non-empty at the end of every run (verifiable on disk).
 - `$PLAYBOOK_DIR/work.md` contains the current run's timestamp (not a stale previous run's content).
 
