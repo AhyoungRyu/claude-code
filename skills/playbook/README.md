@@ -123,6 +123,7 @@ flowchart TD
 | Skills listed in `skills_snapshot.md` but never actually called | Step F mentioned skills in text but didn't invoke them as tools | Step F enforcement: file-based skills → `Skill` tool; OMC agents → `Agent` tool — not inline text |
 | `skills_snapshot.md` is empty | `scan-skills.sh` failed silently | Step C non-empty check: if snapshot has no table rows, stop and report before proceeding |
 | `result.md` never written | Step F completed but skipped the mandatory result gate | Step F now has explicit disk-check before presenting summary to user |
+| `"File has not been read yet"` error when writing `work.md` / `plan.md` / `result.md` | Step R creates files via Bash; the Write tool refuses to overwrite them unless they were previously read with the Read tool in the same session | Steps D/E/E2/F now use Bash heredoc as the primary write method. If using the Write tool, call `Read` on the target file first |
 
 ## Artifacts
 

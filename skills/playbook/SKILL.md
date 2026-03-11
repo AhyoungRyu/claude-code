@@ -228,7 +228,7 @@ State the chosen team/parallel strategy explicitly in the Skill Orchestration se
 1. Read the prompt template: `~/.claude/skills/playbook/templates/codex_runbook_prompt.md`
 2. Fill in all `{{PLACEHOLDERS}}` with actual values from Steps A-C
 3. Write the complete runbook yourself, following all the same constraints and phase templates
-4. Use the **Write tool** to save to `$PLAYBOOK_DIR/work.md`
+4. Save to `$PLAYBOOK_DIR/work.md` using **Bash heredoc** (or Read then Write tool). If using the Write tool, you MUST first call `Read "$PLAYBOOK_DIR/work.md"` to satisfy the read-before-write precondition. Failure to do so will cause a "File has not been read yet" error.
 
 **IMPORTANT**: If the primary path fails, immediately fall back to the Claude-authors-directly path. Do NOT abandon the playbook workflow. Either path produces the same artifact: a complete runbook written to `$PLAYBOOK_DIR/work.md`.
 
@@ -276,9 +276,18 @@ If any issue is found, the runbook must note it inline as `⚠️ ISSUE: <descri
 
 ## Step E — Materialize
 
-Write the runbook to `$PLAYBOOK_DIR/work.md` using the **Write tool** (or Bash printf/redirect). The file MUST contain the full runbook — not the placeholder from Step R.
+Write the runbook to `$PLAYBOOK_DIR/work.md` using **Bash heredoc** (recommended):
+```bash
+cat <<'RUNBOOK_EOF' > "$PLAYBOOK_DIR/work.md"
+...full runbook content...
+RUNBOOK_EOF
+```
+If using the Write tool instead, you MUST first call `Read "$PLAYBOOK_DIR/work.md"` to satisfy the read-before-write precondition. Failure to do so will cause a "File has not been read yet" error. The file MUST contain the full runbook — not the placeholder from Step R.
 
-**Verification gate**: After writing, confirm `work.md` no longer contains `*(runbook will be written here)*`. If it does, the write failed — retry.
+**Verification gate**: After writing, confirm `work.md` no longer contains `*(runbook will be written here)*`. If it does, the write failed. Recovery sequence:
+1. Call `Read` on the target file first, then retry with the Write tool.
+2. If still failing, use Bash heredoc instead (`cat <<'EOF' > "$PLAYBOOK_DIR/work.md"` ... `EOF`).
+3. Re-verify after each attempt before proceeding.
 
 If the Consistency Check section contains any `⚠️ ISSUE:` entries:
 - Surface them to the user.
@@ -295,9 +304,12 @@ If no issues: proceed to Step E2 immediately without asking.
 
 ### E2a — Code tasks (`code-change`, `refactor`, `code-cleanup`)
 
-Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` using the **Write tool** (or Bash printf/redirect) **before any code is touched**.
+Extract the Plan phase from `work.md` and write it to `$PLAYBOOK_DIR/plan.md` using **Bash heredoc** (or Read then Write tool) **before any code is touched**. If using the Write tool, you MUST first call `Read "$PLAYBOOK_DIR/plan.md"` to satisfy the read-before-write precondition. Failure to do so will cause a "File has not been read yet" error.
 
-**Verification gate**: After writing, confirm `plan.md` no longer contains `*(plan will be written here before execution)*`. If it does, the write failed — retry.
+**Verification gate**: After writing, confirm `plan.md` no longer contains `*(plan will be written here before execution)*`. If it does, the write failed. Recovery sequence:
+1. Call `Read` on the target file first, then retry with the Write tool.
+2. If still failing, use Bash heredoc instead (`cat <<'EOF' > "$PLAYBOOK_DIR/plan.md"` ... `EOF`).
+3. Re-verify after each attempt before proceeding.
 
 `plan.md` MUST include:
 1. **Files to modify** — list each file path and the nature of change
@@ -315,13 +327,16 @@ Do NOT start modifying source files until plan.md exists on disk.
 
 ### E2b — Non-code tasks (research, docs, planning, file-ops, config)
 
-Write a brief findings/context summary to `$PLAYBOOK_DIR/plan.md` using the **Write tool** (or Bash printf/redirect). Replace the Step R placeholder with:
+Write a brief findings/context summary to `$PLAYBOOK_DIR/plan.md` using **Bash heredoc** (or Read then Write tool). If using the Write tool, you MUST first call `Read "$PLAYBOOK_DIR/plan.md"` to satisfy the read-before-write precondition. Failure to do so will cause a "File has not been read yet" error. Replace the Step R placeholder with:
 1. **Task type and scope** — what was classified and what is in scope
 2. **Key findings so far** — what Context/Analyze/Inventory phases discovered
 3. **Constraints applied** — which Step B constraints are relevant
 4. **Skill mapping** — which skills will be used in Step F
 
-**Verification gate**: After writing, confirm `plan.md` no longer contains `*(plan will be written here before execution)*`. If it does, the write failed — retry.
+**Verification gate**: After writing, confirm `plan.md` no longer contains `*(plan will be written here before execution)*`. If it does, the write failed. Recovery sequence:
+1. Call `Read` on the target file first, then retry with the Write tool.
+2. If still failing, use Bash heredoc instead (`cat <<'EOF' > "$PLAYBOOK_DIR/plan.md"` ... `EOF`).
+3. Re-verify after each attempt before proceeding.
 
 This ensures plan.md is always a useful run artifact, even when no code is changed.
 
@@ -353,7 +368,7 @@ For all other situations — including ambiguous task types, multiple valid appr
 
 **Mandatory result.md gate — write this before declaring completion:**
 
-Write the run summary to `$PLAYBOOK_DIR/result.md` using the **Write tool** (or Bash printf/redirect), containing:
+Write the run summary to `$PLAYBOOK_DIR/result.md` using **Bash heredoc** (or Read then Write tool). If using the Write tool, you MUST first call `Read "$PLAYBOOK_DIR/result.md"` to satisfy the read-before-write precondition. Failure to do so will cause a "File has not been read yet" error. The file must contain:
 
 ```markdown
 # result.md
