@@ -34,30 +34,91 @@ printf "# result.md\nRun: %s\n\n(summary will be written after review completes)
 ---
 
 
-## Step 1 — Detect PR Context & Check Codex CLI
+## Step 1 — Parse Arguments, Detect PR Context & Check Codex CLI
 
-Run these in parallel:
-1. `gh pr view --json number,title,body,baseRefName,headRefName,additions,deletions,files` — PR metadata
-2. `git diff --name-only $(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo "HEAD~1") HEAD` — changed files
-3. `gh pr view --json comments,reviews` — existing review comments (avoid duplicate feedback)
-4. **Codex CLI availability check:**
-   ```bash
-   CODEX_AVAILABLE=false
-   CODEX_SKIP_REASON=""
-   if ! command -v codex &>/dev/null; then
-     CODEX_SKIP_REASON="codex CLI not found in PATH"
-   elif ! codex --version &>/dev/null; then
-     CODEX_SKIP_REASON="codex CLI installed but not functional"
-   else
-     # Quick auth check — codex review requires valid credentials
-     CODEX_VERSION=$(codex --version 2>&1)
-     CODEX_AVAILABLE=true
-   fi
-   ```
-   Store `CODEX_AVAILABLE` and `CODEX_SKIP_REASON` for use in Step 3.
+### 1a — Parse `$ARGUMENTS`
 
-If $ARGUMENTS is a PR number → `gh pr checkout $ARGUMENTS` first, then proceed.
-If $ARGUMENTS is empty → assume current branch.
+Parse `$ARGUMENTS` to determine these variables:
+
+```
+PR_NUMBER=""        # PR number (if provided)
+HEAD_REF=""         # head branch to review
+BASE_REF=""         # base branch for comparison
+REVIEW_FOCUS=""     # security | performance | api | quality (if provided)
+NO_FIX=false        # --no-fix flag
+```
+
+**Parsing rules** (apply in order):
+
+| `$ARGUMENTS` pattern | Action |
+|---|---|
+| Empty | Use current branch: `HEAD_REF=$(git branch --show-current)`. Find PR via `gh pr list --head "$HEAD_REF" --json number,baseRefName -q '.[0]'`. |
+| Number only (e.g., `731`) | `PR_NUMBER=731`. Get refs via `gh pr view 731 --json headRefName,baseRefName -q '.headRefName + " " + .baseRefName'`. |
+| `remote <branch-name>` | `HEAD_REF=<branch-name>`. Find PR via `gh pr list --head "$HEAD_REF" --json number,baseRefName -q '.[0]'`. **No local checkout needed.** |
+| Contains `--no-fix` | Set `NO_FIX=true`, strip flag, continue parsing remaining args. |
+| Contains keyword (`security`, `performance`, `api`, `quality`) | Set `REVIEW_FOCUS` to that keyword, strip it, continue parsing remaining args. |
+| Combined (e.g., `731 security`) | Parse number as `PR_NUMBER`, keyword as `REVIEW_FOCUS`. |
+
+**Error handling:**
+- If `gh pr list --head` returns empty → error: `"No PR found for branch <HEAD_REF>"` and stop.
+- If `gh pr view <number>` fails → error: `"PR #<number> not found"` and stop.
+
+### 1b — Fetch remote refs & compute diff (branch-independent)
+
+Once `HEAD_REF` and `BASE_REF` are determined:
+
+```bash
+# Fetch remote refs — no local checkout required
+git fetch origin "$HEAD_REF":"refs/remotes/origin/$HEAD_REF" "$BASE_REF":"refs/remotes/origin/$BASE_REF" 2>/dev/null
+
+# Verify fetch succeeded
+if ! git rev-parse "origin/$HEAD_REF" &>/dev/null; then
+  echo "ERROR: Failed to fetch origin/$HEAD_REF" && exit 1
+fi
+if ! git rev-parse "origin/$BASE_REF" &>/dev/null; then
+  echo "ERROR: Failed to fetch origin/$BASE_REF" && exit 1
+fi
+
+# Diff always uses origin refs — never depends on local branch state
+DIFF_CMD="git diff origin/$BASE_REF...origin/$HEAD_REF"
+CHANGED_FILES=$($DIFF_CMD --name-only)
+FULL_DIFF=$($DIFF_CMD)
+DIFF_STAT=$($DIFF_CMD --stat)
+```
+
+If `CHANGED_FILES` is empty → warn: `"No changes detected between origin/$BASE_REF and origin/$HEAD_REF"`.
+
+**Fallback for empty `$ARGUMENTS` (current branch, no PR found):**
+If no PR is associated with the current branch, fall back to the legacy diff:
+```bash
+BASE_REF="main"
+DIFF_CMD="git diff $(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1) HEAD"
+```
+
+### 1c — Fetch PR metadata & reviews (parallel)
+
+Run these in parallel (use `PR_NUMBER` from 1a):
+
+1. `gh pr view $PR_NUMBER --json number,title,body,baseRefName,headRefName,additions,deletions,files` — PR metadata
+2. `gh pr view $PR_NUMBER --json comments,reviews` — existing review comments (avoid duplicate feedback)
+
+### 1d — Codex CLI availability check
+
+```bash
+CODEX_AVAILABLE=false
+CODEX_SKIP_REASON=""
+if ! command -v codex &>/dev/null; then
+  CODEX_SKIP_REASON="codex CLI not found in PATH"
+elif ! codex --version &>/dev/null; then
+  CODEX_SKIP_REASON="codex CLI installed but not functional"
+else
+  # Quick auth check — codex review requires valid credentials
+  CODEX_VERSION=$(codex --version 2>&1)
+  CODEX_AVAILABLE=true
+fi
+```
+
+Store `CODEX_AVAILABLE`, `CODEX_SKIP_REASON`, `DIFF_CMD`, `FULL_DIFF`, `CHANGED_FILES`, `DIFF_STAT`, `BASE_REF`, `HEAD_REF` for use in subsequent steps.
 
 ## Step 2 — Smart Agent Routing
 
@@ -91,7 +152,7 @@ Use the Agent tool with `run_in_background: true` to launch all applicable agent
 
 Each agent receives:
 - PR title and description (from Step 1)
-- `git diff` output scoped to changed files
+- `$FULL_DIFF` (the `origin/$BASE_REF...origin/$HEAD_REF` diff from Step 1b)
 - Instruction: **focus only on changed files**, not the entire codebase
 - LSP and AST tools available for deep analysis (`lsp_diagnostics`, `ast_grep_search`)
 - For newly introduced wrapper components or utility functions, **read their callsites** before assessing the pattern — the caller's constraints (render props, async context, platform limitations) often justify designs that look unusual in isolation
@@ -101,12 +162,10 @@ Each agent receives:
 **If `CODEX_AVAILABLE` is true**, run `codex review` in the background simultaneously with Track A:
 
 ```bash
-# Determine the base branch for comparison
-BASE_BRANCH=$(gh pr view --json baseRefName -q '.baseRefName' 2>/dev/null || echo "main")
-
+# Use BASE_REF from Step 1a — always compare against origin refs
 # Run codex review and capture output
 codex review \
-  --base "$BASE_BRANCH" \
+  --base "origin/$BASE_REF" \
   --title "[PR Title from Step 1]" \
   "Review this PR thoroughly. Focus on: logic bugs, security issues, performance problems, API contract violations, missing error handling, and test coverage gaps. For each issue found, provide: 1) file path and line number, 2) severity (Critical/High/Medium/Low), 3) description, 4) suggested fix. Also note positive patterns worth keeping." \
   2>&1
@@ -253,5 +312,6 @@ If Codex CLI is not available, the skill works normally with Claude Code agents 
 /review-pr 731                   # review PR #731
 /review-pr security              # security-focused review only
 /review-pr --no-fix              # analysis only, skip local fixes
-/review-pr remote branch-name    # review a remote branch's PR
+/review-pr remote test-check     # review remote branch's PR (no local checkout needed)
+/review-pr 731 security          # review PR #731, security focus only
 ```
