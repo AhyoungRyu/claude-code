@@ -102,8 +102,9 @@ Run these in parallel (use `PR_NUMBER` from 1a):
 1. `gh pr view $PR_NUMBER --json number,title,body,baseRefName,headRefName,additions,deletions,files` — PR metadata
 2. `gh pr view $PR_NUMBER --json comments,reviews` — existing review comments (avoid duplicate feedback)
 
-### 1d — Codex CLI availability check
+### 1d — External CLI availability checks
 
+**Codex CLI:**
 ```bash
 CODEX_AVAILABLE=false
 CODEX_SKIP_REASON=""
@@ -112,13 +113,26 @@ if ! command -v codex &>/dev/null; then
 elif ! codex --version &>/dev/null; then
   CODEX_SKIP_REASON="codex CLI installed but not functional"
 else
-  # Quick auth check — codex review requires valid credentials
   CODEX_VERSION=$(codex --version 2>&1)
   CODEX_AVAILABLE=true
 fi
 ```
 
-Store `CODEX_AVAILABLE`, `CODEX_SKIP_REASON`, `DIFF_CMD`, `FULL_DIFF`, `CHANGED_FILES`, `DIFF_STAT`, `BASE_REF`, `HEAD_REF` for use in subsequent steps.
+**Gemini CLI:**
+```bash
+GEMINI_AVAILABLE=false
+GEMINI_SKIP_REASON=""
+if ! command -v gemini &>/dev/null; then
+  GEMINI_SKIP_REASON="gemini CLI not found in PATH"
+elif ! gemini --version &>/dev/null; then
+  GEMINI_SKIP_REASON="gemini CLI installed but not functional"
+else
+  GEMINI_VERSION=$(gemini --version 2>&1)
+  GEMINI_AVAILABLE=true
+fi
+```
+
+Store `CODEX_AVAILABLE`, `CODEX_SKIP_REASON`, `GEMINI_AVAILABLE`, `GEMINI_SKIP_REASON`, `DIFF_CMD`, `FULL_DIFF`, `CHANGED_FILES`, `DIFF_STAT`, `BASE_REF`, `HEAD_REF` for use in subsequent steps.
 
 ## Step 2 — Smart Agent Routing
 
@@ -142,9 +156,9 @@ Examine the changed file list and select applicable agents:
 
 If $ARGUMENTS specifies a specific aspect (e.g., "security", "performance") → run only that agent.
 
-## Step 3 — Launch Reviews in Parallel (Claude Code + Codex CLI)
+## Step 3 — Launch Reviews in Parallel (Claude Code + Codex CLI + Gemini CLI)
 
-Launch **two review tracks** simultaneously:
+Launch **up to three review tracks** simultaneously:
 
 ### Track A: Claude Code Specialist Agents
 
@@ -182,8 +196,47 @@ Reason: [CODEX_SKIP_REASON]
 **Handle Codex runtime failures** — if the `codex review` command exits non-zero or produces an error (e.g., authentication failure, rate limit, network error):
 - Capture the error output
 - Set `CODEX_SKIP_REASON` to the actual error message (e.g., "Authentication failed — run `codex login` to re-authenticate", "Rate limit exceeded", "Network timeout")
-- Continue with Claude Code results only
+- Continue with other tracks' results
 - Report the failure reason in the final report
+
+### Track C: Gemini CLI Review
+
+**If `GEMINI_AVAILABLE` is true**, run Gemini analysis in the background simultaneously with Tracks A and B.
+
+Gemini's strength is its 1M token context window — feed it the **full diff plus surrounding file contents** for holistic analysis:
+
+```bash
+# Use --include-directories for broad context, plus the full diff
+gemini -m gemini-2.5-pro \
+  "You are reviewing a PR (origin/$BASE_REF...origin/$HEAD_REF).
+
+Changed files:
+$CHANGED_FILES
+
+Full diff:
+$FULL_DIFF
+
+Review this PR for:
+1. Architecture and design pattern issues across the changed files
+2. Security vulnerabilities (injection, auth bypass, data exposure)
+3. Cross-file consistency (are changes in one file properly reflected in related files?)
+4. Missing error handling or edge cases
+5. Performance concerns (N+1 queries, unnecessary re-renders, memory leaks)
+
+For each issue: file:line, severity (Critical/High/Medium/Low), description, suggested fix.
+Also note positive patterns worth keeping." \
+  2>&1
+```
+
+Save the Gemini output to `$PLAYBOOK_DIR/gemini-review.md`.
+
+**If `GEMINI_AVAILABLE` is false**, record the skip:
+```
+## Gemini CLI Review: SKIPPED
+Reason: [GEMINI_SKIP_REASON]
+```
+
+**Handle Gemini runtime failures** — same pattern as Codex: capture error, set `GEMINI_SKIP_REASON`, continue with other tracks.
 
 ### Critical Review Mindset (include in every Claude agent prompt)
 
@@ -196,17 +249,18 @@ Every issue found MUST pass these filters before being reported:
 
 ## Step 4 — Cross-Validate & Aggregate Report
 
-After both tracks complete, **cross-validate findings** before compiling the final report.
+After all tracks complete, **cross-validate findings** before compiling the final report.
 
 ### Cross-Validation Process
 
-1. **Merge findings**: Collect all issues from Claude Code agents (Track A) and Codex CLI (Track B).
+1. **Merge findings**: Collect all issues from Claude Code agents (Track A), Codex CLI (Track B), and Gemini CLI (Track C).
 
-2. **Classify each finding into one of these categories:**
-   - **Corroborated**: Both Claude and Codex flagged the same issue (or substantially similar). **High confidence** — include with boosted credibility.
-   - **Claude-only**: Only Claude agents found this. Assess whether Codex likely missed it (complex logic requiring deep context) or whether it might be a false positive (overly cautious pattern matching).
-   - **Codex-only**: Only Codex found this. Assess whether Claude agents likely missed it or whether the finding is inaccurate. Read the relevant code to verify.
-   - **Contradicted**: Claude and Codex disagree on the same code section. **Investigate the actual code** to determine which assessment is correct. State which reviewer was right and why.
+2. **Classify each finding by agreement level:**
+   - **Strong consensus** (2+ sources agree): High confidence — include with boosted credibility. If all 3 sources agree, mark as **unanimous**.
+   - **Claude-only**: Only Claude agents found this. Assess whether the other models likely missed it (complex logic requiring deep context) or whether it might be a false positive.
+   - **Codex-only**: Only Codex found this. Verify by reading the relevant code.
+   - **Gemini-only**: Only Gemini found this. Gemini's large context may catch cross-file issues others miss, but verify specificity — Gemini can be broad.
+   - **Contradicted**: Two or more sources disagree on the same code section. **Investigate the actual code** to determine which assessment is correct. State which reviewer(s) were right and why.
 
 3. **Accuracy judgment**: For each non-corroborated finding, add a brief accuracy assessment:
    - `[Verified]` — manually confirmed by reading the code
@@ -225,6 +279,7 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 |--------|--------|-------|
 | Claude Code (specialist agents) | Completed | [list of agents used] |
 | Codex CLI | Completed / SKIPPED | [version or skip reason] |
+| Gemini CLI | Completed / SKIPPED | [version or skip reason] |
 
 ## Review Matrix
 | Reviewer         | Verdict           | Critical | High | Medium | Low |
@@ -235,19 +290,22 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 | Performance      | APPROVE/COMMENT   |    X     |  X   |   X    |  X  |
 | API Compat.      | APPROVE/REQUEST   |    X     |  X   |   X    |  X  |
 | Codex CLI        | APPROVE/REQUEST/SKIPPED |  X  |  X   |   X    |  X  |
+| Gemini CLI       | APPROVE/REQUEST/SKIPPED |  X  |  X   |   X    |  X  |
 
 ---
 
 ## Cross-Validation Summary
-- **Corroborated findings** (both Claude & Codex agree): X issues
+- **Unanimous findings** (all available sources agree): X issues
+- **Strong consensus** (2+ sources agree): X issues
 - **Claude-only findings**: X issues (Y verified, Z questionable)
 - **Codex-only findings**: X issues (Y verified, Z questionable)
-- **Contradictions resolved**: X (Claude correct: Y, Codex correct: Z)
+- **Gemini-only findings**: X issues (Y verified, Z questionable)
+- **Contradictions resolved**: X (explain which source was correct per issue)
 
 ---
 
 ## 🔴 Critical Issues (must fix before merge)
-- `file.ts:42` — [issue description] — **Source:** [Claude+Codex / Claude-only / Codex-only] — **Fix:** [concrete fix]
+- `file.ts:42` — [issue description] — **Source:** [Unanimous / Claude+Codex / Claude+Gemini / Codex+Gemini / Claude-only / Codex-only / Gemini-only] — **Fix:** [concrete fix]
 
 ## 🟠 High Issues (should fix)
 - `file.ts:88` — [issue description] — **Source:** [source] [accuracy tag] — **Fix:** [concrete fix]
@@ -291,19 +349,20 @@ cp -r claude-code/skills/review-pr ~/.claude/skills/
 cp claude-code/skills/review-pr/skill.md ~/.claude/commands/review-pr.md
 ```
 
-### Optional: Codex CLI Setup
+### Optional: External CLI Setup
 
-For dual-model review, install and authenticate Codex CLI:
+For tri-model review, install and authenticate Codex CLI and/or Gemini CLI:
+
 ```bash
-# Install
-npm install -g @anthropic-ai/codex
-# or: brew install codex
+# Codex CLI
+npm install -g @openai/codex
+codex auth
 
-# Authenticate
-codex login
+# Gemini CLI
+npm install -g @google/gemini-cli
 ```
 
-If Codex CLI is not available, the skill works normally with Claude Code agents only.
+If either CLI is not available, the skill works with whichever sources are present. Claude Code agents always run.
 
 ## Usage
 
