@@ -3,6 +3,7 @@
 Triggers: "PR 코멘트 분석", "리뷰 코멘트 확인", "review pr comments", "analyze pr feedback", "PR 리뷰 처리"
 
 GitHub PR 리뷰 코멘트를 분석하고, 수정 후 리뷰어에게 자동으로 응답을 작성해주는 스킬입니다.
+Claude Code와 Codex CLI를 병렬로 실행하여 리뷰 코멘트를 분석하고, 두 결과를 교차 검증하여 정확도 높은 리포트를 생성합니다.
 
 ## Installation
 
@@ -16,6 +17,15 @@ cp -r claude-code/skills/review-pr-comments ~/.claude/skills/
 # Install humanizer dependency
 cp -r claude-code/skills/humanizer ~/.claude/skills/
 ```
+
+### Optional: Codex CLI Setup
+
+For dual-model analysis, install and authenticate Codex CLI:
+```bash
+npm install -g @anthropic-ai/codex   # or: brew install codex
+codex login
+```
+If Codex CLI is not available, the skill works normally with Claude Code only.
 
 ## Usage
 
@@ -32,7 +42,26 @@ cp -r claude-code/skills/humanizer ~/.claude/skills/
 
 ---
 
-You are an expert AI assistant helping with GitHub PR code review processing. Analyzes recent pull request comments and generates an action plan for code updates.
+You are an expert AI assistant helping with GitHub PR code review processing. Analyzes recent pull request comments using both Claude Code and Codex CLI in parallel, cross-validates results, and generates an action plan for code updates.
+
+## Step 0 — Check Codex CLI Availability
+
+Before starting analysis, check if Codex CLI is available:
+
+```bash
+CODEX_AVAILABLE=false
+CODEX_SKIP_REASON=""
+if ! command -v codex &>/dev/null; then
+  CODEX_SKIP_REASON="codex CLI not found in PATH"
+elif ! codex --version &>/dev/null; then
+  CODEX_SKIP_REASON="codex CLI installed but not functional"
+else
+  CODEX_VERSION=$(codex --version 2>&1)
+  CODEX_AVAILABLE=true
+fi
+```
+
+Store `CODEX_AVAILABLE` and `CODEX_SKIP_REASON` for later steps.
 
 ## Behavior
 
@@ -68,30 +97,97 @@ When user uses natural language instead of explicit flags, detect intent and map
 
 ## Default Mode: Analyze and Apply Feedback
 
-### Your job is to:
+### Step 1 — Fetch PR comments
 
-1. **Fetch PR comments**
-   - Get all code review comments from the specified PR
-   - Filter for recent, unresolved comments from teammates
+- Get all code review comments from the specified PR
+- Filter for recent, unresolved comments from teammates
 
-2. **Analyze each comment critically**
-   - Is it technically valid?
-   - Is it actionable?
-   - Is it aligned with best practices?
-   
-3. **For each comment:**
-   - **If YES (valid feedback):** Suggest how to incorporate it into the code
-   - **If NO (not appropriate):** Explain why and propose an alternative if necessary
+### Step 2 — Dual-Model Analysis (Parallel)
 
-4. **Process comments sequentially**
-   - Summarize the intent
-   - Assess validity
-   - Propose action plan (if applicable) or reasoned rejection
+Launch **two analysis tracks** simultaneously:
 
-5. **Present a full plan**
-   - Which changes to make
-   - In what order
-   - Why each change is needed
+#### Track A: Claude Code Analysis
+
+Analyze each comment critically using Claude Code:
+- Is it technically valid?
+- Is it actionable?
+- Is it aligned with best practices?
+
+For each comment:
+- **If YES (valid feedback):** Suggest how to incorporate it into the code
+- **If NO (not appropriate):** Explain why and propose an alternative if necessary
+
+Process comments sequentially:
+- Summarize the intent
+- Assess validity
+- Propose action plan (if applicable) or reasoned rejection
+
+#### Track B: Codex CLI Analysis
+
+**If `CODEX_AVAILABLE` is true**, run Codex analysis in the background simultaneously with Track A:
+
+```bash
+# Prepare a prompt with all PR comments for Codex to analyze
+# Include: comment body, file path, line number, reviewer, and the current code context
+codex exec \
+  "Analyze the following PR review comments. For each comment, assess:
+   1. Is the feedback technically valid? Why or why not?
+   2. What is the recommended action (accept/reject/modify)?
+   3. If accepting, what specific code change should be made?
+   4. Severity: Critical/High/Medium/Low
+
+   PR Comments:
+   [paste formatted comments here]
+
+   Current code context:
+   [paste relevant git diff or file contents]" \
+  2>&1
+```
+
+**If `CODEX_AVAILABLE` is false**, record:
+```
+Codex CLI analysis: SKIPPED
+Reason: [CODEX_SKIP_REASON]
+```
+
+**Handle Codex runtime failures** — if the command exits non-zero:
+- Capture the error output (e.g., "Authentication failed", "Rate limit exceeded")
+- Set `CODEX_SKIP_REASON` to the actual error message
+- Continue with Claude Code results only
+
+### Step 3 — Cross-Validate Results
+
+After both tracks complete, cross-validate the analyses:
+
+1. **For each PR comment**, compare Claude and Codex assessments:
+   - **Both agree (valid):** High confidence — proceed with suggested fix
+   - **Both agree (reject):** High confidence — skip with clear rationale
+   - **Disagree:** Investigate the actual code to determine which assessment is correct
+     - State which reviewer was right and why
+     - Tag as `[Claude correct]` or `[Codex correct]`
+
+2. **Generate a cross-validation summary:**
+   ```
+   ## Analysis Sources
+   | Source | Status |
+   |--------|--------|
+   | Claude Code | Completed |
+   | Codex CLI | Completed / SKIPPED ([reason]) |
+
+   ## Cross-Validation
+   - Agreed (accept): X comments
+   - Agreed (reject): Y comments
+   - Disagreed: Z comments (Claude correct: A, Codex correct: B)
+   ```
+
+### Step 4 — Present Action Plan
+
+Present the unified, cross-validated plan:
+- Which changes to make
+- In what order
+- Why each change is needed
+- Confidence level (corroborated by both / single-source)
+- For disagreements, explain the resolution
 
 ### Rules
 
@@ -100,6 +196,7 @@ When user uses natural language instead of explicit flags, detect intent and map
 - Always reason about **why** a suggestion is good or bad before recommending code changes.
 - Refer to the current code implementation in the PR to make informed judgments.
 - **Do NOT commit changes or push** in this mode. Just analysis and local changes.
+- **Cross-validation disagreements must be resolved** — never present contradictory recommendations without a verdict.
 
 ---
 
