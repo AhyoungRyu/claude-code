@@ -102,6 +102,20 @@ When user uses natural language instead of explicit flags, detect intent and map
 - Get all code review comments from the specified PR
 - Filter for recent, unresolved comments from teammates
 
+**Also check for existing Codex review comments on the PR** (from GitHub Codex bot integration):
+
+```bash
+# Fetch inline review comments left by Codex bot
+CODEX_PR_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {path, line: .original_line, body, commit: .original_commit_id}]' \
+  2>/dev/null)
+```
+
+When processing Codex bot comments:
+- For each Codex GitHub comment, assess whether the PR author has already addressed it in subsequent commits (compare `commit_id` of the comment vs the latest PR commit)
+- Mark addressed comments as `[Addressed]` and unaddressed ones as `[Open]`
+- Include unaddressed Codex bot comments alongside human reviewer comments for analysis
+
 ### Step 2 — Dual-Model Analysis (Parallel)
 
 Launch **two analysis tracks** simultaneously:

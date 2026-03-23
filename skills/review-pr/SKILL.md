@@ -173,16 +173,43 @@ Each agent receives:
 
 ### Track B: Codex CLI Review
 
-**If `CODEX_AVAILABLE` is true**, run `codex review` in the background simultaneously with Track A:
+**If `CODEX_AVAILABLE` is true**, run `codex review` in the background simultaneously with Track A.
+
+**Important constraints:**
+- `codex review --base <branch>` diffs the **currently checked-out branch** against the given base. It does NOT support diffing two arbitrary remote refs.
+- `--base` and `[PROMPT]` arguments are **mutually exclusive** — you cannot pass custom review instructions when using `--base`.
+- `--title` can be combined with `--base`.
+
+**Execution steps (handles both local and remote branch modes):**
 
 ```bash
-# Use BASE_REF from Step 1a — always compare against origin refs
-# Run codex review and capture output
-codex review \
+# Step 1: Ensure we're on the PR head branch
+CURRENT_BRANCH=$(git branch --show-current)
+NEEDS_CHECKOUT=false
+
+if [ "$CURRENT_BRANCH" != "$HEAD_REF" ]; then
+  # Remote branch mode — checkout PR head locally
+  NEEDS_CHECKOUT=true
+  git fetch origin "$HEAD_REF" 2>/dev/null
+  git checkout -B "$HEAD_REF" "origin/$HEAD_REF" 2>/dev/null
+fi
+
+# Step 2: Run codex review (no [PROMPT] allowed with --base)
+CODEX_OUTPUT=$(codex review \
   --base "origin/$BASE_REF" \
-  --title "[PR Title from Step 1]" \
-  "Review this PR thoroughly. Focus on: logic bugs, security issues, performance problems, API contract violations, missing error handling, and test coverage gaps. For each issue found, provide: 1) file path and line number, 2) severity (Critical/High/Medium/Low), 3) description, 4) suggested fix. Also note positive patterns worth keeping." \
-  2>&1
+  --title "$PR_TITLE" \
+  2>&1)
+CODEX_EXIT=$?
+
+# Step 3: Return to original branch if we switched
+if [ "$NEEDS_CHECKOUT" = true ]; then
+  git checkout "$CURRENT_BRANCH" 2>/dev/null
+fi
+
+# Step 4: Handle result
+if [ $CODEX_EXIT -ne 0 ]; then
+  CODEX_SKIP_REASON="codex review exited $CODEX_EXIT: $CODEX_OUTPUT"
+fi
 ```
 
 Save the Codex output to `$PLAYBOOK_DIR/codex-review.md`.
@@ -198,6 +225,21 @@ Reason: [CODEX_SKIP_REASON]
 - Set `CODEX_SKIP_REASON` to the actual error message (e.g., "Authentication failed — run `codex login` to re-authenticate", "Rate limit exceeded", "Network timeout")
 - Continue with other tracks' results
 - Report the failure reason in the final report
+
+**Also check for existing Codex review comments on the PR** (from GitHub Codex bot integration):
+
+```bash
+# Fetch inline review comments left by Codex bot
+CODEX_PR_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {path, line: .original_line, body, commit: .original_commit_id}]' \
+  2>/dev/null)
+```
+
+When compiling the final report:
+- Include existing Codex GitHub comments alongside local Codex CLI findings
+- For each Codex GitHub comment, assess whether the PR author has already addressed it in subsequent commits (compare `commit_id` of the comment vs the latest PR commit)
+- Mark addressed comments as `[Addressed]` and unaddressed ones as `[Open]`
+- Avoid duplicating findings that overlap between Codex CLI and Codex GitHub bot
 
 ### Track C: Gemini CLI Review
 
