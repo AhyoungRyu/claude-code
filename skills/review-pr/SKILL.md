@@ -95,12 +95,28 @@ BASE_REF="main"
 DIFF_CMD="git diff $(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1) HEAD"
 ```
 
-### 1c — Fetch PR metadata & reviews (parallel)
+### 1c — Fetch PR metadata, reviews & existing bot comments (parallel)
 
 Run these in parallel (use `PR_NUMBER` from 1a):
 
 1. `gh pr view $PR_NUMBER --json number,title,body,baseRefName,headRefName,additions,deletions,files` — PR metadata
 2. `gh pr view $PR_NUMBER --json comments,reviews` — existing review comments (avoid duplicate feedback)
+3. Fetch existing Codex bot inline comments to build an **exclusion list**:
+
+```bash
+# Fetch all inline review comments left by Codex bot and human reviewers
+ALL_PR_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" \
+  --jq '[.[] | {user: .user.login, path, line: .original_line, body, commit: .original_commit_id}]' \
+  2>/dev/null)
+
+# Extract Codex bot comments specifically
+CODEX_BOT_COMMENTS=$(echo "$ALL_PR_COMMENTS" | jq '[.[] | select(.user == "chatgpt-codex-connector[bot]")]')
+```
+
+**Build an exclusion list** from existing bot comments:
+- Extract `path:line` pairs and a brief summary of each already-flagged issue
+- This list is passed to all review agents in Step 3 so they **skip issues already covered**
+- Also note whether each bot comment appears addressed (compare `commit` field vs latest PR commit) or still open
 
 ### 1d — External CLI availability checks
 
@@ -168,6 +184,7 @@ Each agent receives:
 - PR title and description (from Step 1)
 - `$FULL_DIFF` (the `origin/$BASE_REF...origin/$HEAD_REF` diff from Step 1b)
 - Instruction: **focus only on changed files**, not the entire codebase
+- **Exclusion list from Step 1c**: list of `path:line` + summary of issues already flagged by Codex bot on the PR. **Do NOT re-report these issues.** Only report them if you have a materially different assessment (e.g., the bot's suggestion is wrong, or the issue is more severe than flagged).
 - LSP and AST tools available for deep analysis (`lsp_diagnostics`, `ast_grep_search`)
 - For newly introduced wrapper components or utility functions, **read their callsites** before assessing the pattern — the caller's constraints (render props, async context, platform limitations) often justify designs that look unusual in isolation
 
@@ -297,6 +314,11 @@ After all tracks complete, **cross-validate findings** before compiling the fina
 
 1. **Merge findings**: Collect all issues from Claude Code agents (Track A), Codex CLI (Track B), and Gemini CLI (Track C).
 
+2. **Deduplicate against existing PR comments**: Before classifying findings, compare each issue against the exclusion list (Codex bot comments from Step 1c). If an issue is substantially the same as an existing bot comment:
+   - **Drop it** from the new findings list
+   - Add it to a separate "Already Flagged by Codex Bot" section in the report (with status: Open/Addressed)
+   - Only retain it as a new finding if the review agent's assessment materially differs from the bot's (different severity, different root cause, or the bot was wrong)
+
 2. **Classify each finding by agreement level:**
    - **Strong consensus** (2+ sources agree): High confidence — include with boosted credibility. If all 3 sources agree, mark as **unanimous**.
    - **Claude-only**: Only Claude agents found this. Assess whether the other models likely missed it (complex logic requiring deep context) or whether it might be a false positive.
@@ -343,6 +365,13 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 - **Codex-only findings**: X issues (Y verified, Z questionable)
 - **Gemini-only findings**: X issues (Y verified, Z questionable)
 - **Contradictions resolved**: X (explain which source was correct per issue)
+
+## Existing Codex Bot Comments (pre-review)
+| # | File:Line | Summary | Status |
+|---|-----------|---------|--------|
+| 1 | `file.ts:42` | [brief summary of bot comment] | Open / Addressed |
+
+> These issues were already flagged by the Codex bot on the PR and are excluded from new findings below.
 
 ---
 

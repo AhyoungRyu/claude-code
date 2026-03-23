@@ -101,6 +101,7 @@ When user uses natural language instead of explicit flags, detect intent and map
 
 - Get all code review comments from the specified PR
 - Filter for recent, unresolved comments from teammates
+- **Identify Codex bot comments separately**: Comments from `chatgpt-codex-connector[bot]` are pre-existing automated feedback. Build an exclusion list of `path:line` + summary. These are not re-analyzed in Step 2 — instead, they are listed in the final report as "Pre-existing Bot Feedback" with Open/Addressed status.
 
 **Also check for existing Codex review comments on the PR** (from GitHub Codex bot integration):
 
@@ -122,7 +123,7 @@ Launch **two analysis tracks** simultaneously:
 
 #### Track A: Claude Code Analysis
 
-Analyze each comment critically using Claude Code:
+Analyze each **human reviewer** comment critically using Claude Code (skip Codex bot comments — they are reported separately):
 - Is it technically valid?
 - Is it actionable?
 - Is it aligned with best practices?
