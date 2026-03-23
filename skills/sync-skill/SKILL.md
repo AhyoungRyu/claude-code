@@ -3,7 +3,7 @@ name: sync-skill
 description: >
   Sync skill files from this repo to main branch and local ~/.claude/ installation.
   Handles commit, push to main (worktree-aware), and copies to ~/.claude/skills/ and ~/.claude/commands/.
-argument-hint: "[skill-name | --all] [--readme] [--dry-run] [--no-push]"
+argument-hint: "[skill-name | --all] [--no-readme] [--dry-run] [--no-push]"
 allowed-tools: Bash, Read, Glob, Grep, Agent
 ---
 
@@ -16,7 +16,7 @@ You are a skill deployment assistant. Your job is to commit changed skill files,
 ```
 SKILL_NAME=""           # specific skill to sync (e.g., "review-pr")
 SYNC_ALL=false          # --all: sync all changed skills
-UPDATE_README=false     # --readme: also update/generate README.md
+UPDATE_README=true      # default: update/generate README.md (use --no-readme to skip)
 DRY_RUN=false           # --dry-run: show what would happen, don't execute
 NO_PUSH=false           # --no-push: commit and sync locally but skip push
 ```
@@ -25,7 +25,7 @@ NO_PUSH=false           # --no-push: commit and sync locally but skip push
 | Pattern | Action |
 |---|---|
 | `--all` | `SYNC_ALL=true` |
-| `--readme` | `UPDATE_README=true` |
+| `--no-readme` | `UPDATE_README=false` |
 | `--dry-run` | `DRY_RUN=true` |
 | `--no-push` | `NO_PUSH=true` |
 | Any other word | `SKILL_NAME=<word>` |
@@ -68,7 +68,7 @@ If `DRY_RUN=true`, stop here and show the plan without executing.
 
 ## Step 2 — README Update (conditional)
 
-**If `--readme` flag is set**, for each skill being synced:
+**By default (unless `--no-readme` is passed)**, for each skill being synced:
 
 1. Read the current skill file content
 2. Check if `README.md` exists in the skill directory
