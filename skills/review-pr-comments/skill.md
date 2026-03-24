@@ -3,7 +3,7 @@
 Triggers: "PR 코멘트 분석", "리뷰 코멘트 확인", "review pr comments", "analyze pr feedback", "PR 리뷰 처리"
 
 GitHub PR 리뷰 코멘트를 분석하고, 수정 후 리뷰어에게 자동으로 응답을 작성해주는 스킬입니다.
-Claude Code와 Codex CLI를 병렬로 실행하여 리뷰 코멘트를 분석하고, 두 결과를 교차 검증하여 정확도 높은 리포트를 생성합니다.
+Claude Code와 Codex/Gemini CLI를 병렬로 실행하여 리뷰 코멘트를 분석하고, 결과를 교차 검증하여 정확도 높은 리포트를 생성합니다.
 
 ## Installation
 
@@ -61,7 +61,19 @@ else
 fi
 ```
 
-Store `CODEX_AVAILABLE` and `CODEX_SKIP_REASON` for later steps.
+**Gemini CLI:**
+```bash
+GEMINI_AVAILABLE=false
+GEMINI_SKIP_REASON=""
+if ! command -v gemini &>/dev/null; then
+  GEMINI_SKIP_REASON="gemini CLI not found in PATH"
+else
+  GEMINI_VERSION=$(gemini --version 2>&1)
+  GEMINI_AVAILABLE=true
+fi
+```
+
+Store `CODEX_AVAILABLE`, `CODEX_SKIP_REASON`, `GEMINI_AVAILABLE`, and `GEMINI_SKIP_REASON` for later steps.
 
 ## Behavior
 

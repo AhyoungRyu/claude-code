@@ -4,10 +4,11 @@ Automates GitHub PR code review processing workflow.
 
 ## What it does
 
-1. **Analyze PR comments** - Fetches and analyzes code review feedback
-2. **Generate action plans** - Suggests how to address each comment
-3. **Auto-respond to reviewers** - After fixing, posts summary back to PR with natural language
-4. **Include GitHub links** - Adds clickable links to changed files and commits
+1. **Analyze PR comments** - Fetches and analyzes code review feedback using dual-model analysis (Claude Code + Codex CLI)
+2. **Separate bot vs human feedback** - Identifies Codex bot (`chatgpt-codex-connector[bot]`) comments and tracks their Open/Addressed status separately
+3. **Generate action plans** - Cross-validates findings and suggests how to address each comment
+4. **Auto-respond to reviewers** - After fixing, posts summary back to PR with natural language
+5. **Include GitHub links** - Adds clickable links to changed files and commits
 
 ## Installation
 
@@ -266,6 +267,19 @@ The response will include:
 - GitHub CLI (`gh`) installed and authenticated
 - Git installed
 - [humanizer skill](../humanizer/) installed
+
+### Optional: External CLI (for dual/tri-model analysis)
+
+```bash
+# Codex CLI
+npm install -g @openai/codex
+codex auth
+
+# Gemini CLI
+npm install -g @google/gemini-cli
+```
+
+If either CLI is not available, the skill works with whichever sources are present. Claude Code always runs.
 
 ## Dependencies
 
