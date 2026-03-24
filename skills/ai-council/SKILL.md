@@ -60,7 +60,7 @@ codex exec --approval-mode suggest "<task>" --context-file <file>
 **Query Gemini:**
 ```bash
 # Default or specify model for complex analysis
-gemini -m gemini-2.5-pro "Analyze from architecture and security standpoints: [problem]. Context: $(cat <file>)"
+gemini -m gemini-3.1-pro-preview "Analyze from architecture and security standpoints: [problem]. Context: $(cat <file>)"
 
 # Include entire directories for project-wide analysis (leverage 1M context)
 gemini --include-directories ./src,./lib "<analyze project structure>"
@@ -121,7 +121,7 @@ gemini --include-directories ./src "Recommend Redux vs Context API with rational
 ### Code Review
 ```bash
 codex exec "Review for bugs and improvements" --context-file src/utils.ts
-gemini -m gemini-2.5-pro "Security and performance review: $(cat src/utils.ts)"
+gemini -m gemini-3.1-pro-preview "Security and performance review: $(cat src/utils.ts)"
 ```
 
 ### Bug Investigation

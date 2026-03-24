@@ -266,7 +266,7 @@ Gemini's strength is its 1M token context window — feed it the **full diff plu
 
 ```bash
 # Use --include-directories for broad context, plus the full diff
-gemini -m gemini-2.5-pro \
+gemini -m gemini-3.1-pro-preview \
   "You are reviewing a PR (origin/$BASE_REF...origin/$HEAD_REF).
 
 Changed files:
