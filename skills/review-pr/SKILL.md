@@ -132,6 +132,15 @@ else
   CODEX_VERSION=$(codex --version 2>&1)
   CODEX_AVAILABLE=true
 fi
+
+# Read model config from ~/.codex/config.toml and build -c flags.
+# codex subcommands (review, exec) may ignore config.toml model settings,
+# so we pass them explicitly via -c flags to guarantee the user's preferred model.
+CODEX_MODEL=$(grep '^model\s*=' ~/.codex/config.toml 2>/dev/null | sed 's/.*=\s*"\(.*\)"/\1/' | head -1)
+CODEX_EFFORT=$(grep '^model_reasoning_effort\s*=' ~/.codex/config.toml 2>/dev/null | sed 's/.*=\s*"\(.*\)"/\1/' | head -1)
+CODEX_CONFIG_FLAGS=""
+[ -n "$CODEX_MODEL" ] && CODEX_CONFIG_FLAGS="$CODEX_CONFIG_FLAGS -c model=$CODEX_MODEL"
+[ -n "$CODEX_EFFORT" ] && CODEX_CONFIG_FLAGS="$CODEX_CONFIG_FLAGS -c model_reasoning_effort=$CODEX_EFFORT"
 ```
 
 **Gemini CLI:**
@@ -212,7 +221,8 @@ if [ "$CURRENT_BRANCH" != "$HEAD_REF" ]; then
 fi
 
 # Step 2: Run codex review (no [PROMPT] allowed with --base)
-CODEX_OUTPUT=$(codex review \
+# $CODEX_CONFIG_FLAGS passes model + reasoning effort from ~/.codex/config.toml
+CODEX_OUTPUT=$(codex $CODEX_CONFIG_FLAGS review \
   --base "origin/$BASE_REF" \
   --title "$PR_TITLE" \
   2>&1)
