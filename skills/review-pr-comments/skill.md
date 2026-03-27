@@ -111,6 +111,11 @@ When user uses natural language instead of explicit flags, detect intent and map
 - Example: "bang9의 리뷰 코멘트 확인해줘" → `--reviewer=bang9`
 - Example: "@ahyoungryu 코멘트 분석" → `--reviewer=ahyoungryu`
 
+**Resolve bot detection:**
+- "봇 정리", "codex 정리", "resolve bot", "hide bot comments", "봇 코멘트 숨기기" → Add `--resolve-bot` flag
+- "전부 정리", "all bot", "resolve all" → Add `--resolve-bot=all` flag
+- Example: "PR 코멘트 반영하고 codex 봇 코멘트 정리해줘" → `--post-response --commit --resolve-bot`
+
 **Default behavior (no flags detected):**
 - Simple triggers like "PR 코멘트 분석" → Default mode (analyze and apply feedback locally, no posting)
 
@@ -128,8 +133,14 @@ When user uses natural language instead of explicit flags, detect intent and map
 
 ```bash
 # Fetch inline review comments left by Codex bot
+# Include node_id (for GraphQL minimize) and pull_request_review_id (for resolve)
 CODEX_PR_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" \
-  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {path, line: .original_line, body, commit: .original_commit_id}]' \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {id, node_id, path, line: .original_line, body, commit: .original_commit_id, pull_request_review_id}]' \
+  2>/dev/null)
+
+# Also fetch the main review comment (top-level review body) from Codex bot
+CODEX_REVIEW_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {id, node_id, body, state, commit_id}]' \
   2>/dev/null)
 ```
 
@@ -137,6 +148,7 @@ When processing Codex bot comments:
 - For each Codex GitHub comment, assess whether the PR author has already addressed it in subsequent commits (compare `commit_id` of the comment vs the latest PR commit)
 - Mark addressed comments as `[Addressed]` and unaddressed ones as `[Open]`
 - Include unaddressed Codex bot comments alongside human reviewer comments for analysis
+- Store `node_id` values for later use in Step 5 (hide & resolve)
 
 ### Step 2 — Dual-Model Analysis (Parallel)
 
@@ -234,6 +246,95 @@ Present the unified, cross-validated plan:
 - Refer to the current code implementation in the PR to make informed judgments.
 - **Do NOT commit changes or push** in this mode. Just analysis and local changes.
 - **Cross-validation disagreements must be resolved** — never present contradictory recommendations without a verdict.
+
+### Step 5 — Hide & Resolve Codex Bot Comments
+
+After addressing Codex bot feedback (either in Default Mode or Extended Mode with `--commit`), automatically hide and resolve the bot's PR comments so they don't clutter the review.
+
+**When to run:**
+- After all Codex bot comments marked `[Addressed]` have been fixed in code
+- When `--resolve-bot` flag is passed (explicit), OR when `--post-response --commit` is used (implicit — addressed comments are auto-resolved after push)
+- Use `--resolve-bot=all` to resolve ALL Codex bot comments (including `[Open]` ones)
+- Default: only resolve `[Addressed]` comments
+
+**Step 5a — Minimize (hide) inline review comments:**
+
+```bash
+# For each addressed Codex bot inline comment, minimize it with reason "RESOLVED"
+for NODE_ID in $ADDRESSED_CODEX_COMMENT_NODE_IDS; do
+  gh api graphql -f query='
+    mutation {
+      minimizeComment(input: {subjectId: "'"$NODE_ID"'", classifier: RESOLVED}) {
+        minimizedComment {
+          isMinimized
+          minimizedReason
+        }
+      }
+    }' 2>/dev/null
+done
+```
+
+**Step 5b — Minimize the main review comment (top-level body):**
+
+The Codex bot leaves a top-level review comment (e.g., "I have created review suggestions for this pull request"). This should also be minimized:
+
+```bash
+# Minimize the top-level review body from Codex bot
+for REVIEW_NODE_ID in $CODEX_REVIEW_NODE_IDS; do
+  gh api graphql -f query='
+    mutation {
+      minimizeComment(input: {subjectId: "'"$REVIEW_NODE_ID"'", classifier: RESOLVED}) {
+        minimizedComment {
+          isMinimized
+          minimizedReason
+        }
+      }
+    }' 2>/dev/null
+done
+```
+
+**Step 5c — Resolve review threads:**
+
+```bash
+# For each inline comment, resolve its review thread
+# First get the thread node_id from the comment
+for COMMENT_NODE_ID in $ADDRESSED_CODEX_COMMENT_NODE_IDS; do
+  # Get the thread ID for this comment
+  THREAD_ID=$(gh api graphql -f query='
+    query {
+      node(id: "'"$COMMENT_NODE_ID"'") {
+        ... on PullRequestReviewComment {
+          pullRequestReview {
+            id
+          }
+        }
+      }
+    }' --jq '.data.node.pullRequestReview.id' 2>/dev/null)
+
+  # Resolve the thread using the comment's thread
+  gh api graphql -f query='
+    mutation {
+      resolveReviewThread(input: {threadId: "'"$COMMENT_NODE_ID"'"}) {
+        thread {
+          isResolved
+        }
+      }
+    }' 2>/dev/null
+done
+```
+
+**Error handling:**
+- If `gh api graphql` fails (e.g., insufficient permissions), log the error and continue with remaining comments
+- Report which comments were successfully resolved and which failed
+- Common failure: the `GITHUB_TOKEN` may lack `write:discussion` scope — warn the user if 403 is returned
+
+**Report output:**
+```
+## Codex Bot Comments: Hide & Resolve
+- ✅ Minimized: 5 inline comments + 1 main review comment
+- ✅ Resolved: 5 review threads
+- ❌ Failed: 0
+```
 
 ---
 
@@ -342,6 +443,7 @@ After addressing PR comments locally, generate a concise summary of what was cha
 | `--reviewer=username` | Specify reviewer (auto-detected if omitted) | `--reviewer=bang9` |
 | `--since=TIMESTAMP` | Check comments since this timestamp | `2026-02-11` (date only)<br>`2026-02-11T14:30:00+09:00` (with time & timezone)<br>`2026-02-11T05:30:00Z` (UTC) |
 | `--pr=number` | Specify PR number (auto-detected from branch if omitted) | `--pr=1753` |
+| `--resolve-bot` | Hide & resolve addressed Codex bot comments (auto with `--post-response --commit`) | `--resolve-bot`, `--resolve-bot=all` |
 
 **Timestamp format (ISO 8601):**
 - Date only: `YYYY-MM-DD`

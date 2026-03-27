@@ -217,6 +217,38 @@ Specifies the PR number. If omitted, auto-detects from current branch.
 
 ---
 
+### `--resolve-bot`
+
+Hide and resolve addressed Codex bot (`chatgpt-codex-connector[bot]`) comments on the PR. Minimizes inline comments and the main review comment with reason "RESOLVED", then resolves the review threads.
+
+**Usage:** Can be standalone or combined with `--post-response --commit` (auto-triggered for addressed comments)
+
+**Variants:**
+- `--resolve-bot` — resolve only `[Addressed]` bot comments (default)
+- `--resolve-bot=all` — resolve ALL bot comments including `[Open]` ones
+
+**Examples:**
+```bash
+# Resolve addressed bot comments after fixing
+/review-pr-comments --resolve-bot
+
+# Full workflow: commit fixes, post response, clean up bot comments
+/review-pr-comments --post-response --commit --resolve-bot
+
+# Resolve all bot comments regardless of status
+/review-pr-comments --resolve-bot=all
+```
+
+**What it does:**
+1. Minimizes (hides) inline review comments with reason "RESOLVED"
+2. Minimizes the top-level review body comment
+3. Resolves review threads for each comment
+4. Reports success/failure count
+
+**Note:** Requires `GITHUB_TOKEN` with sufficient permissions. If you get 403 errors, check that your token has write access to pull request reviews.
+
+---
+
 ## Combined Examples
 
 ### Example 1: Full workflow with draft review and links
@@ -261,6 +293,7 @@ The response will include:
 - ✅ Timestamp filtering with timezone support
 - ✅ Multi-reviewer support
 - ✅ Cross-PR support
+- ✅ Auto-hide & resolve Codex bot comments (`--resolve-bot`)
 
 ## Requirements
 
