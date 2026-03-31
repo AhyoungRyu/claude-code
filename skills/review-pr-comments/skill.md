@@ -257,7 +257,27 @@ After addressing Codex bot feedback (either in Default Mode or Extended Mode wit
 - Use `--resolve-bot=all` to resolve ALL Codex bot comments (including `[Open]` ones)
 - Default: only resolve `[Addressed]` comments
 
-**Step 5a — Minimize (hide) inline review comments:**
+**Step 5a — Reply to each bot comment with resolution status:**
+
+Before minimizing, reply to each Codex bot comment explaining how it was addressed. This gives reviewers context on why the thread was resolved.
+
+```bash
+# For each Codex bot comment, post a reply with its resolution status
+for COMMENT_ID in $ALL_CODEX_COMMENT_IDS; do
+  # STATUS is one of: "Addressed", "Phase 2 defer", "Out of scope", "Partially addressed"
+  # REPLY_BODY explains what was done (if addressed) or why it was deferred/skipped
+  gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments/$COMMENT_ID/replies" \
+    -X POST -f body="$REPLY_BODY" 2>/dev/null
+done
+```
+
+Reply format per status:
+- **Addressed:** `Addressed — {brief description of the code change made}`
+- **Phase 2 defer:** `Phase 2 defer — {reason why it requires future work and what's tracked}`
+- **Partially addressed:** `Partially addressed — {what was done} / {what remains for Phase 2}`
+- **Out of scope:** `Out of scope — {brief reason why this is outside the PR's scope}`
+
+**Step 5b — Minimize (hide) inline review comments:**
 
 ```bash
 # For each addressed Codex bot inline comment, minimize it with reason "RESOLVED"
@@ -274,7 +294,7 @@ for NODE_ID in $ADDRESSED_CODEX_COMMENT_NODE_IDS; do
 done
 ```
 
-**Step 5b — Minimize the main review comment (top-level body):**
+**Step 5c — Minimize the main review comment (top-level body):**
 
 The Codex bot leaves a top-level review comment (e.g., "I have created review suggestions for this pull request"). This should also be minimized:
 
@@ -293,7 +313,7 @@ for REVIEW_NODE_ID in $CODEX_REVIEW_NODE_IDS; do
 done
 ```
 
-**Step 5c — Resolve review threads:**
+**Step 5d — Resolve review threads:**
 
 ```bash
 # For each inline comment, resolve its review thread
@@ -330,7 +350,8 @@ done
 
 **Report output:**
 ```
-## Codex Bot Comments: Hide & Resolve
+## Codex Bot Comments: Reply, Hide & Resolve
+- ✅ Replied: 5 inline comments (Addressed: 3, Phase 2 defer: 1, Out of scope: 1)
 - ✅ Minimized: 5 inline comments + 1 main review comment
 - ✅ Resolved: 5 review threads
 - ❌ Failed: 0
