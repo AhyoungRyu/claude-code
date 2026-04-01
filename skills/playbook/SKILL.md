@@ -190,7 +190,7 @@ After a run, if significant decisions were made, offer to append a summary to st
 Before writing the Skill Orchestration section (Step D), consult this routing table.
 When a runbook step matches a Codex or Gemini trigger, that external model MUST be used — it is not optional.
 
-**Codex routing** (`/oh-my-claudecode:ask-codex`, model: `gpt-5.4 xhigh`) — REQUIRED when a step involves:
+**Codex routing** (`/oh-my-claudecode:ask-codex`, profile: `coding`) — REQUIRED when a step involves:
 
 | Step type | Trigger keywords |
 |-----------|-----------------|

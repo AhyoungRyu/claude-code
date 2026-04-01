@@ -47,14 +47,15 @@ Clearly state the decision/problem and identify relevant context files.
 
 **Query Codex:**
 ```bash
-# Default model: gpt-5-codex (complex tasks)
-codex exec "What's your recommended approach for [problem]? Focus on implementation trade-offs." --context-file <file>
+# Use the coding profile for exec-based Codex discussions.
+# Default model/profile should resolve to the higher-effort coding path.
+codex --profile coding exec "What's your recommended approach for [problem]? Focus on implementation trade-offs. Context: $(cat <file>)"
 
 # For simple/fast queries
-codex exec --model gpt-5-codex-mini "<simple question>"
+codex --profile coding exec --model gpt-5-codex-mini "<simple question>"
 
-# Always use suggest mode for safety
-codex exec --approval-mode suggest "<task>" --context-file <file>
+# Include file context inline when needed
+codex --profile coding exec "<task>. Context: $(cat <file>)"
 ```
 
 **Query Gemini:**
@@ -112,7 +113,7 @@ gemini --web-search "<latest library trends>"
 ### Architecture Decision
 ```bash
 # Get Codex's view
-codex exec "Should we use Redux or Context API? $(cat src/App.tsx | head -50)"
+codex --profile coding exec "Should we use Redux or Context API? $(cat src/App.tsx | head -50)"
 
 # Get Gemini's view (leverage directory inclusion)
 gemini --include-directories ./src "Recommend Redux vs Context API with rationale"
@@ -120,13 +121,13 @@ gemini --include-directories ./src "Recommend Redux vs Context API with rational
 
 ### Code Review
 ```bash
-codex exec "Review for bugs and improvements" --context-file src/utils.ts
+codex --profile coding exec "Review for bugs and improvements. Context: $(cat src/utils.ts)"
 gemini -m gemini-3.1-pro-preview "Security and performance review: $(cat src/utils.ts)"
 ```
 
 ### Bug Investigation
 ```bash
-codex exec "What could cause this error? $(cat error.log | tail -30)"
+codex --profile coding exec "What could cause this error? $(cat error.log | tail -30)"
 gemini "Analyze potential root causes: $(cat error.log | tail -30)"
 ```
 

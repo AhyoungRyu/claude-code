@@ -133,14 +133,9 @@ else
   CODEX_AVAILABLE=true
 fi
 
-# Read model config from ~/.codex/config.toml and build -c flags.
-# codex subcommands (review, exec) may ignore config.toml model settings,
-# so we pass them explicitly via -c flags to guarantee the user's preferred model.
-CODEX_MODEL=$(grep '^model\s*=' ~/.codex/config.toml 2>/dev/null | sed 's/.*=\s*"\(.*\)"/\1/' | head -1)
-CODEX_EFFORT=$(grep '^model_reasoning_effort\s*=' ~/.codex/config.toml 2>/dev/null | sed 's/.*=\s*"\(.*\)"/\1/' | head -1)
-CODEX_CONFIG_FLAGS=""
-[ -n "$CODEX_MODEL" ] && CODEX_CONFIG_FLAGS="$CODEX_CONFIG_FLAGS -c model=$CODEX_MODEL"
-[ -n "$CODEX_EFFORT" ] && CODEX_CONFIG_FLAGS="$CODEX_CONFIG_FLAGS -c model_reasoning_effort=$CODEX_EFFORT"
+# Run built-in Codex reviews with the dedicated review profile.
+# This keeps review effort at "high" even if the default coding profile uses "xhigh".
+CODEX_REVIEW_FLAGS="--profile review"
 ```
 
 **Gemini CLI:**
@@ -201,6 +196,8 @@ Each agent receives:
 
 **If `CODEX_AVAILABLE` is true**, run `codex review` in the background simultaneously with Track A.
 
+**Timeout: 600000ms (10 minutes).** Codex review with high reasoning effort can take 5-10 minutes on large diffs. Always set `timeout: 600000` on the Bash tool call that runs `codex review`.
+
 **Important constraints:**
 - `codex review --base <branch>` diffs the **currently checked-out branch** against the given base. It does NOT support diffing two arbitrary remote refs.
 - `--base` and `[PROMPT]` arguments are **mutually exclusive** — you cannot pass custom review instructions when using `--base`.
@@ -221,8 +218,8 @@ if [ "$CURRENT_BRANCH" != "$HEAD_REF" ]; then
 fi
 
 # Step 2: Run codex review (no [PROMPT] allowed with --base)
-# $CODEX_CONFIG_FLAGS passes model + reasoning effort from ~/.codex/config.toml
-CODEX_OUTPUT=$(codex $CODEX_CONFIG_FLAGS review \
+# $CODEX_REVIEW_FLAGS forces the dedicated review profile.
+CODEX_OUTPUT=$(codex $CODEX_REVIEW_FLAGS review \
   --base "origin/$BASE_REF" \
   --title "$PR_TITLE" \
   2>&1)
@@ -271,6 +268,8 @@ When compiling the final report:
 ### Track C: Gemini CLI Review
 
 **If `GEMINI_AVAILABLE` is true**, run Gemini analysis in the background simultaneously with Tracks A and B.
+
+**Timeout: 600000ms (10 minutes).** Always set `timeout: 600000` on the Bash tool call that runs `gemini`.
 
 Gemini's strength is its 1M token context window — feed it the **full diff plus surrounding file contents** for holistic analysis:
 
