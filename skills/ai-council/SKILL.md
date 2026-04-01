@@ -60,8 +60,18 @@ codex --profile coding exec "<task>. Context: $(cat <file>)"
 
 **Query Gemini:**
 ```bash
-# Default or specify model for complex analysis
-gemini -m gemini-3.1-pro-preview "Analyze from architecture and security standpoints: [problem]. Context: $(cat <file>)"
+# Try gemini-2.5-pro first, fallback to gemini-2.5-flash on 429/rate-limit
+GEMINI_MODEL="gemini-2.5-pro"
+GEMINI_OUTPUT=$(gemini -m "$GEMINI_MODEL" "Analyze from architecture and security standpoints: [problem]. Context: $(cat <file>)" 2>&1)
+GEMINI_EXIT=$?
+if [ $GEMINI_EXIT -ne 0 ] && echo "$GEMINI_OUTPUT" | grep -qi "429\|capacity.exhausted\|rate.limit\|quota"; then
+  echo "⚠ gemini-2.5-pro rate limited, falling back to gemini-2.5-flash..."
+  GEMINI_MODEL="gemini-2.5-flash"
+  GEMINI_OUTPUT=$(gemini -m "$GEMINI_MODEL" "Analyze from architecture and security standpoints: [problem]. Context: $(cat <file>)" 2>&1)
+  GEMINI_EXIT=$?
+fi
+echo "$GEMINI_OUTPUT"
+# Record which model was actually used: $GEMINI_MODEL
 
 # Include entire directories for project-wide analysis (leverage 1M context)
 gemini --include-directories ./src,./lib "<analyze project structure>"
@@ -122,7 +132,7 @@ gemini --include-directories ./src "Recommend Redux vs Context API with rational
 ### Code Review
 ```bash
 codex --profile coding exec "Review for bugs and improvements. Context: $(cat src/utils.ts)"
-gemini -m gemini-3.1-pro-preview "Security and performance review: $(cat src/utils.ts)"
+gemini -m gemini-2.5-pro "Security and performance review: $(cat src/utils.ts)"
 ```
 
 ### Bug Investigation

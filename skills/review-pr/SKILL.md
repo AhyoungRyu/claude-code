@@ -274,9 +274,9 @@ When compiling the final report:
 Gemini's strength is its 1M token context window — feed it the **full diff plus surrounding file contents** for holistic analysis:
 
 ```bash
-# Use --include-directories for broad context, plus the full diff
-gemini -m gemini-3.1-pro-preview \
-  "You are reviewing a PR (origin/$BASE_REF...origin/$HEAD_REF).
+# Try gemini-2.5-pro first, fallback to gemini-2.5-flash on 429/rate-limit
+GEMINI_MODEL="gemini-2.5-pro"
+REVIEW_PROMPT="You are reviewing a PR (origin/$BASE_REF...origin/$HEAD_REF).
 
 Changed files:
 $CHANGED_FILES
@@ -292,9 +292,20 @@ Review this PR for:
 5. Performance concerns (N+1 queries, unnecessary re-renders, memory leaks)
 
 For each issue: file:line, severity (Critical/High/Medium/Low), description, suggested fix.
-Also note positive patterns worth keeping." \
-  2>&1
+Also note positive patterns worth keeping."
+
+GEMINI_OUTPUT=$(gemini -m "$GEMINI_MODEL" "$REVIEW_PROMPT" 2>&1)
+GEMINI_EXIT=$?
+if [ $GEMINI_EXIT -ne 0 ] && echo "$GEMINI_OUTPUT" | grep -qi "429\|capacity.exhausted\|rate.limit\|quota"; then
+  echo "⚠ gemini-2.5-pro rate limited, falling back to gemini-2.5-flash..."
+  GEMINI_MODEL="gemini-2.5-flash"
+  GEMINI_OUTPUT=$(gemini -m "$GEMINI_MODEL" "$REVIEW_PROMPT" 2>&1)
+  GEMINI_EXIT=$?
+fi
+echo "$GEMINI_OUTPUT"
 ```
+
+Record which model was actually used (`$GEMINI_MODEL`) for the report — either `[gemini-2.5-pro]` or `[gemini-2.5-flash (fallback)]`.
 
 Save the Gemini output to `$PLAYBOOK_DIR/gemini-review.md`.
 
@@ -352,7 +363,7 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 |--------|--------|-------|
 | Claude Code (specialist agents) | Completed | [list of agents used] |
 | Codex CLI | Completed / SKIPPED | [version or skip reason] |
-| Gemini CLI | Completed / SKIPPED | [version or skip reason] |
+| Gemini CLI | Completed / SKIPPED | [gemini-2.5-pro] or [gemini-2.5-flash (fallback)] or [skip reason] |
 
 ## Review Matrix
 | Reviewer         | Verdict           | Critical | High | Medium | Low |
