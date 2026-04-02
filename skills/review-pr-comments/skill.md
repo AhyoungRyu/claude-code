@@ -255,6 +255,18 @@ Present the unified, cross-validated plan:
 
 After addressing Codex bot feedback (either in Default Mode or Extended Mode with `--commit`), automatically hide and resolve the bot's PR comments so they don't clutter the review.
 
+**CRITICAL — Three independent operations, ALL required:**
+1. **Reply** (5a) — post resolution status as reply to each comment
+2. **Minimize** (5b) — hide comment body in PR UI (`minimizeComment` mutation)
+3. **Resolve** (5c) — collapse review thread (`resolveReviewThread` mutation)
+
+Skipping minimize but doing resolve will leave comment bodies visible. Skipping resolve but doing minimize will leave threads expanded. **Always execute all three.**
+
+**CRITICAL — GraphQL vs REST `author.login` mismatch:**
+- REST API `user.login` → `"chatgpt-codex-connector[bot]"` (WITH `[bot]` suffix)
+- GraphQL `author { login }` → `"chatgpt-codex-connector"` (WITHOUT `[bot]` suffix)
+- **Always use REST API for collecting bot comment/review node_ids.** Use GraphQL only for mutations and thread queries (with the correct login string).
+
 **When to run:**
 - After all Codex bot comments marked `[Addressed]` have been fixed in code
 - When `--resolve-bot` flag is passed (explicit), OR when `--post-response --commit` is used (implicit — addressed comments are auto-resolved after push)
@@ -263,13 +275,10 @@ After addressing Codex bot feedback (either in Default Mode or Extended Mode wit
 
 **Step 5a — Reply to each bot comment with resolution status:**
 
-Before minimizing, reply to each Codex bot comment explaining how it was addressed. This gives reviewers context on why the thread was resolved.
+Before minimizing, reply to each Codex bot comment explaining how it was addressed.
 
 ```bash
-# For each Codex bot comment, post a reply with its resolution status
 for COMMENT_ID in $ALL_CODEX_COMMENT_IDS; do
-  # STATUS is one of: "Addressed", "Phase 2 defer", "Out of scope", "Partially addressed"
-  # REPLY_BODY explains what was done (if addressed) or why it was deferred/skipped
   gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments/$COMMENT_ID/replies" \
     -X POST -f body="$REPLY_BODY" 2>/dev/null
 done
@@ -281,70 +290,98 @@ Reply format per status:
 - **Partially addressed:** `Partially addressed — {what was done} / {what remains for Phase 2}`
 - **Out of scope:** `Out of scope — {brief reason why this is outside the PR's scope}`
 
-**Step 5b — Minimize (hide) inline review comments:**
+**Step 5b — Minimize ALL bot nodes (inline comments + top-level review bodies):**
+
+Both `PRRC_*` (inline) and `PRR_*` (top-level review) node IDs use the same `minimizeComment` mutation. Collect via REST API, then minimize via GraphQL.
 
 ```bash
-# For each addressed Codex bot inline comment, minimize it with reason "RESOLVED"
-for NODE_ID in $ADDRESSED_CODEX_COMMENT_NODE_IDS; do
+# Collect inline comment node_ids via REST (reliable — uses user.login WITH [bot])
+COMMENT_NODE_IDS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" --paginate \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .node_id] | .[]')
+
+# Collect top-level review body node_ids via REST
+REVIEW_NODE_IDS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .node_id] | .[]')
+
+# Minimize ALL — both inline comments and review bodies
+for NODE_ID in $COMMENT_NODE_IDS $REVIEW_NODE_IDS; do
   gh api graphql -f query='
     mutation {
       minimizeComment(input: {subjectId: "'"$NODE_ID"'", classifier: RESOLVED}) {
-        minimizedComment {
-          isMinimized
-          minimizedReason
-        }
+        minimizedComment { isMinimized }
       }
     }' 2>/dev/null
 done
 ```
 
-**Step 5c — Minimize the main review comment (top-level body):**
+**Step 5c — Resolve review threads:**
 
-The Codex bot leaves a top-level review comment (e.g., "I have created review suggestions for this pull request"). This should also be minimized:
-
-```bash
-# Minimize the top-level review body from Codex bot
-for REVIEW_NODE_ID in $CODEX_REVIEW_NODE_IDS; do
-  gh api graphql -f query='
-    mutation {
-      minimizeComment(input: {subjectId: "'"$REVIEW_NODE_ID"'", classifier: RESOLVED}) {
-        minimizedComment {
-          isMinimized
-          minimizedReason
-        }
-      }
-    }' 2>/dev/null
-done
-```
-
-**Step 5d — Resolve review threads:**
+Collect thread IDs via GraphQL (threads only exist in GraphQL). Use `"chatgpt-codex-connector"` (WITHOUT `[bot]`) for the GraphQL `author.login` filter.
 
 ```bash
-# For each inline comment, resolve its review thread
-# First get the thread node_id from the comment
-for COMMENT_NODE_ID in $ADDRESSED_CODEX_COMMENT_NODE_IDS; do
-  # Get the thread ID for this comment
-  THREAD_ID=$(gh api graphql -f query='
-    query {
-      node(id: "'"$COMMENT_NODE_ID"'") {
-        ... on PullRequestReviewComment {
-          pullRequestReview {
-            id
+# Get unresolved thread IDs — note: GraphQL uses login WITHOUT [bot]
+THREAD_IDS=$(gh api graphql -f query='
+{
+  repository(owner: "OWNER", name: "REPO") {
+    pullRequest(number: PR_NUMBER) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { author { login } }
           }
         }
       }
-    }' --jq '.data.node.pullRequestReview.id' 2>/dev/null)
+    }
+  }
+}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+  | select(.comments.nodes[0].author.login == "chatgpt-codex-connector")
+  | select(.isResolved == false)
+  | .id] | .[]')
 
-  # Resolve the thread using the comment's thread
+for THREAD_ID in $THREAD_IDS; do
   gh api graphql -f query='
     mutation {
-      resolveReviewThread(input: {threadId: "'"$COMMENT_NODE_ID"'"}) {
-        thread {
-          isResolved
-        }
+      resolveReviewThread(input: {threadId: "'"$THREAD_ID"'"}) {
+        thread { isResolved }
       }
     }' 2>/dev/null
 done
+```
+
+**Step 5d — Verify nothing was missed:**
+
+Re-check via REST API (reliable bot detection) that all comments are minimized.
+
+```bash
+# Check inline comments
+REMAINING_INLINE=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" --paginate \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .node_id] | .[]')
+
+for NODE_ID in $REMAINING_INLINE; do
+  IS_MIN=$(gh api graphql -f query='{ node(id: "'"$NODE_ID"'") { ... on PullRequestReviewComment { isMinimized } } }' \
+    --jq '.data.node.isMinimized' 2>/dev/null)
+  if [ "$IS_MIN" != "true" ]; then
+    echo "MISSED inline: $NODE_ID — retrying..."
+    gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "'"$NODE_ID"'", classifier: RESOLVED}) { minimizedComment { isMinimized } } }' 2>/dev/null
+  fi
+done
+
+# Check review bodies — use node(id) to verify minimize status
+REMAINING_REVIEWS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .node_id] | .[]')
+
+for NODE_ID in $REMAINING_REVIEWS; do
+  IS_MIN=$(gh api graphql -f query='{ node(id: "'"$NODE_ID"'") { ... on PullRequestReview { body } } }' \
+    --jq '.data.node.body' 2>/dev/null)
+  # Review bodies: re-minimize if body is non-empty (means it wasn't minimized)
+  if [ -n "$IS_MIN" ] && [ "$IS_MIN" != "null" ]; then
+    gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "'"$NODE_ID"'", classifier: RESOLVED}) { minimizedComment { isMinimized } } }' 2>/dev/null
+  fi
+done
+
+echo "Verification complete."
 ```
 
 **Error handling:**
@@ -355,9 +392,10 @@ done
 **Report output:**
 ```
 ## Codex Bot Comments: Reply, Hide & Resolve
-- ✅ Replied: 5 inline comments (Addressed: 3, Phase 2 defer: 1, Out of scope: 1)
-- ✅ Minimized: 5 inline comments + 1 main review comment
-- ✅ Resolved: 5 review threads
+- ✅ Replied: X inline comments (Addressed: A, Phase 2 defer: B, Out of scope: C)
+- ✅ Minimized: X inline comments + Y top-level review bodies
+- ✅ Resolved: X review threads
+- ✅ Verified: 0 remaining un-minimized bot comments
 - ❌ Failed: 0
 ```
 
