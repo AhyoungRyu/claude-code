@@ -215,51 +215,64 @@ Each agent receives:
 - `--base` and `[PROMPT]` arguments are **mutually exclusive** — you cannot pass custom review instructions when using `--base`.
 - `--title` can be combined with `--base`.
 
-**Execution steps (handles both local and remote branch modes):**
+**Execution strategy: ALWAYS use an isolated temporary worktree.** Never check out the PR branch in the current working directory — Conductor sessions and other concurrent agents share that path, and an in-place checkout would clobber their state. The temp worktree is cheap (objects are shared with the parent repo) and is removed after the review completes.
 
-> ⚠️ **Conductor / shared-worktree safety guard**: Before checking out a PR branch, detect whether this worktree is shared with other sessions. If yes, **SKIP Track B entirely** with `CODEX_SKIP_REASON="Conductor/shared worktree — checkout would clobber another session's branch"`. Detection signals (any one is enough):
-> - `$CONDUCTOR_WORKSPACE_ID` env var is set, OR
-> - the worktree path matches `*/conductor/{workspaces,repo}/*`, OR
-> - `git worktree list` shows the same path attached to multiple branches owned by other processes
->
-> When skipped, Codex GitHub bot comments still feed the exclusion list — this only disables the *additional* `codex review` CLI run.
+> ⚠️ **Never set `CODEX_AVAILABLE=false` based on environment alone.** The temp-worktree pattern below is the *replacement* for the old "Conductor → SKIP" guard. Codex CLI must run unless the binary itself is missing, the temp-worktree creation fails, or `codex review` itself errors.
 
 ```bash
-# Step 1: Ensure we're on the PR head branch
-CURRENT_BRANCH=$(git branch --show-current)
-NEEDS_CHECKOUT=false
+# Step 1: Create an isolated temp worktree for the PR head — no in-place checkout.
+TEMP_WORKTREE="${TMPDIR:-/tmp}/review-pr-$PR_NUMBER-$$"
+WORKTREE_CREATED=false
 
-# Conductor / shared-worktree detection — bail out before checkout
-if [ -n "$CONDUCTOR_WORKSPACE_ID" ] || [[ "$PWD" == */conductor/workspaces/* ]] || [[ "$PWD" == */conductor/repo/* ]]; then
-  CODEX_AVAILABLE=false
-  CODEX_SKIP_REASON="Conductor/shared worktree — checkout would collide with parallel sessions"
+# Ensure the head ref is fetched (fast, no working-tree side effect)
+git fetch origin "$HEAD_REF":"refs/remotes/origin/$HEAD_REF" 2>/dev/null
+
+if git worktree add --detach "$TEMP_WORKTREE" "origin/$HEAD_REF" 2>/dev/null; then
+  WORKTREE_CREATED=true
+else
+  # Worktree creation failed (disk full, lock contention, etc.) — record and skip cleanly.
+  CODEX_SKIP_REASON="git worktree add failed for origin/$HEAD_REF (check disk + .git/worktrees lock)"
 fi
 
-if [ "$CODEX_AVAILABLE" = true ] && [ "$CURRENT_BRANCH" != "$HEAD_REF" ]; then
-  # Remote branch mode — checkout PR head locally
-  NEEDS_CHECKOUT=true
-  git fetch origin "$HEAD_REF" 2>/dev/null
-  git checkout -B "$HEAD_REF" "origin/$HEAD_REF" 2>/dev/null
+# Cleanup trap — runs even on partial failure / interrupt
+cleanup_codex_worktree() {
+  if [ "$WORKTREE_CREATED" = true ] && [ -d "$TEMP_WORKTREE" ]; then
+    git worktree remove --force "$TEMP_WORKTREE" 2>/dev/null || rm -rf "$TEMP_WORKTREE"
+    git worktree prune 2>/dev/null
+  fi
+}
+trap cleanup_codex_worktree EXIT INT TERM
+
+# Step 2: Run codex review INSIDE the temp worktree (no current-dir checkout, no collision)
+if [ "$WORKTREE_CREATED" = true ]; then
+  # $CODEX_REVIEW_FLAGS forces the dedicated review profile.
+  # Use a subshell so `cd` doesn't leak into the parent's CWD.
+  CODEX_OUTPUT=$(
+    cd "$TEMP_WORKTREE" && \
+    codex $CODEX_REVIEW_FLAGS review \
+      --base "origin/$BASE_REF" \
+      --title "$PR_TITLE" \
+      2>&1
+  )
+  CODEX_EXIT=$?
+
+  # Step 3: Handle result
+  if [ $CODEX_EXIT -ne 0 ]; then
+    CODEX_SKIP_REASON="codex review exited $CODEX_EXIT: $(echo "$CODEX_OUTPUT" | tail -20)"
+  fi
 fi
 
-# Step 2: Run codex review (no [PROMPT] allowed with --base)
-# $CODEX_REVIEW_FLAGS forces the dedicated review profile.
-CODEX_OUTPUT=$(codex $CODEX_REVIEW_FLAGS review \
-  --base "origin/$BASE_REF" \
-  --title "$PR_TITLE" \
-  2>&1)
-CODEX_EXIT=$?
-
-# Step 3: Return to original branch if we switched
-if [ "$NEEDS_CHECKOUT" = true ]; then
-  git checkout "$CURRENT_BRANCH" 2>/dev/null
-fi
-
-# Step 4: Handle result
-if [ $CODEX_EXIT -ne 0 ]; then
-  CODEX_SKIP_REASON="codex review exited $CODEX_EXIT: $CODEX_OUTPUT"
-fi
+# Step 4: Cleanup runs via trap; explicit call here in success path keeps the trap idempotent.
+cleanup_codex_worktree
+trap - EXIT INT TERM
 ```
+
+**Notes on the worktree pattern:**
+- The temp worktree shares the parent repo's `.git/objects` — disk cost is the working tree only (typically a few MB to a few hundred MB).
+- `--detach` avoids creating a named branch; the worktree HEAD is a detached commit at `origin/$HEAD_REF`.
+- Cleanup uses `--force` to handle the case where `codex review` left modified files. `git worktree prune` removes any stale entries from `.git/worktrees/` if the directory was deleted out-of-band.
+- The current shell's CWD is preserved — `codex` runs in a subshell so the user's working directory is never touched.
+- Concurrent `/review-pr` runs (different PRs or sessions) get distinct temp paths via `$$` (PID).
 
 Save the Codex output to `$PLAYBOOK_DIR/codex-review.md`.
 
