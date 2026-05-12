@@ -24,7 +24,7 @@ fi
 mkdir -p "$PLAYBOOK_DIR"
 RUN_TS=$(date -Iseconds)
 printf "# work.md\nRun: %s\nTask type: research (PR review)\n\nGoal: Review PR $ARGUMENTS\n" "$RUN_TS" > "$PLAYBOOK_DIR/work.md"
-printf "# plan.md\nRun: %s\nTask type: research\n\nScope: PR review — analysis only (no code changes unless Critical/High issues found)\n\nConstraints:\n- Cite file paths and line numbers as evidence\n- No code changes unless user explicitly allows it\n\nSkill mapping:\n- Detect context: direct implementation (gh CLI)\n- Agent routing: oh-my-claudecode:analyst\n- Review: oh-my-claudecode:code-reviewer + security-reviewer + quality-reviewer + codex review (parallel)\n- Cross-validate: Claude vs Codex findings\n- Aggregate: direct implementation\n- Fix (conditional): oh-my-claudecode:executor\n" "$RUN_TS" > "$PLAYBOOK_DIR/plan.md"
+printf "# plan.md\nRun: %s\nTask type: research\n\nScope: PR review — analysis only (no code changes unless Critical/High issues found)\n\nConstraints:\n- Cite file paths and line numbers as evidence\n- No code changes unless user explicitly allows it\n- Specialist reviewers receive the FULL PR body verbatim, not a summary\n- Findings on the same surface as existing Codex bot comments require explicit justification\n\nSkill mapping:\n- Detect context: direct implementation (gh CLI)\n- Agent routing: oh-my-claudecode:analyst\n- Review (Step 3): oh-my-claudecode:code-reviewer + security-reviewer + quality-reviewer + codex review CLI + gemini CLI (parallel)\n- Step 4a: merge + cross-validate + auto-down-rank findings missing author-intent justification\n- Step 4b: verifier round (cross-model devil's advocate) — keeps decision trail\n- Step 4c: reviewer rebuttal mini-loop (only for unanimous/Critical/Verified drops)\n- Fix (conditional): oh-my-claudecode:executor\n" "$RUN_TS" > "$PLAYBOOK_DIR/plan.md"
 printf "# result.md\nRun: %s\n\n(summary will be written after review completes)\n" "$RUN_TS" > "$PLAYBOOK_DIR/result.md"
 ```
 
@@ -95,14 +95,64 @@ BASE_REF="main"
 DIFF_CMD="git diff $(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1) HEAD"
 ```
 
-### 1c — Fetch PR metadata & reviews (parallel)
+### 1c — Fetch PR metadata, reviews & existing bot comments (parallel)
 
-Run these in parallel (use `PR_NUMBER` from 1a):
+Run these in parallel (use `PR_NUMBER` from 1a). **Capture the FULL PR body verbatim** — it is required input to Step 3, not just a summary. Many false-positives ("scope leak", "undocumented side-effect") are caused by reviewers not seeing the PR body.
 
-1. `gh pr view $PR_NUMBER --json number,title,body,baseRefName,headRefName,additions,deletions,files` — PR metadata
-2. `gh pr view $PR_NUMBER --json comments,reviews` — existing review comments (avoid duplicate feedback)
+1. `gh pr view $PR_NUMBER --json number,title,body,baseRefName,headRefName,additions,deletions,files,headRefOid` — PR metadata. Save `body` verbatim to `$PR_BODY` (do NOT summarize; specialist reviewers receive the full text).
+2. `gh pr view $PR_NUMBER --json comments,reviews` — existing review comments and review-level submissions
+3. Fetch existing Codex bot inline comments + reviews to build an **exclusion list**:
 
-### 1d — External CLI availability checks
+```bash
+# Fetch ALL inline review comments (bot + human reviewers)
+ALL_PR_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" \
+  --jq '[.[] | {user: .user.login, path, line: .original_line, body, commit: .original_commit_id}]' \
+  2>/dev/null)
+
+# Extract Codex bot comments specifically
+CODEX_BOT_COMMENTS=$(echo "$ALL_PR_COMMENTS" | jq '[.[] | select(.user == "chatgpt-codex-connector[bot]")]')
+
+# Fetch review-level submissions (Codex bot leaves a review with "react with 👍" when it has NO concerns)
+CODEX_BOT_REVIEWS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {state, body, commit_id, submitted_at}]' \
+  2>/dev/null)
+
+LATEST_HEAD_SHA=$(gh pr view $PR_NUMBER --json headRefOid -q .headRefOid)
+```
+
+**Build a strengthened exclusion list** from existing bot signals:
+- For each Codex bot inline comment: capture `path`, `line`, summary, status (Open/Addressed). A comment is **Addressed** when its `commit_id` is older than `LATEST_HEAD_SHA` AND no later bot comment re-raises the same `path:line`.
+- For each Codex bot review submission: if `state == "APPROVED"` or body contains "react with 👍" (no-concerns signal) AND its `commit_id == LATEST_HEAD_SHA`, treat the bot as having **signed off on the current head**. Record this prominently in the exclusion list.
+- **Surface-neighborhood rule**: any path:line within ±20 lines of an existing bot comment is the *same surface*. New findings on the same surface require explicit justification — see Step 3 author-intent rule.
+- The full exclusion list + `$PR_BODY` are passed to **every** review agent in Step 3 and to the verifier in Step 4b.
+
+### 1d — Fetch linked external spec/design docs (CRITICAL)
+
+**The single biggest cause of false-positive findings is reviewing a PR without reading its linked spec.**
+Many "issues" surfaced by reviewers (wire format, response shape, scope semantics, naming) are settled by the spec the author already linked in the PR body. If you skip this step, expect ~5–10 false positives per non-trivial PR.
+
+Extract all external links from `$PR_BODY` (captured in 1c) and fetch them BEFORE Step 2. Apply to:
+
+- **Confluence / Atlassian wiki pages** — load via `mcp__claude_ai_Atlassian__getConfluencePage` (pass `pageId` and `cloudId`). Tiny links (`/wiki/x/<id>`) work too.
+- **Jira tickets** — load via `mcp__claude_ai_Atlassian__getJiraIssue` for acceptance criteria and linked artifacts.
+- **Google Docs / Notion / public wikis** — use `WebFetch` to capture the text.
+- **GitHub issues / discussions on other repos** — use `gh issue view <url>` or `WebFetch`.
+
+If MCP tools for Atlassian are not loaded, call `ToolSearch` with the tool name first (e.g., `select:mcp__claude_ai_Atlassian__getConfluencePage`).
+
+For each fetched spec, extract:
+- **Wire contracts** — exact request body field names, query params vs body, response shape, status codes (e.g., `200 OK + {}` vs `204 No Content`)
+- **Semantic invariants** — what "optional" means, what default behavior is, what fields are filters vs attribution
+- **Cross-endpoint relationships** — how multiple endpoints' responses share types
+- **Workspace/feature-flag interactions** — admin policies that change endpoint behavior
+
+Save the fetched spec content to `$PLAYBOOK_DIR/specs/` (one file per link, named after the page title) and pass the **distilled facts** into every Step 3 reviewer prompt under a `## SPEC FACTS` section.
+
+> Findings that contradict the spec are auto-dropped in Step 4a. Reviewers must check their findings against the spec facts before reporting.
+
+**Skip rule:** If no external links are present in the PR body, or all links are internal-tools-only (CI dashboards, Slack threads), proceed without this step. Do NOT block on a single link that returns 403/404 — record the failure in `$PLAYBOOK_DIR/specs/_failures.md` and continue with the rest.
+
+### 1e — External CLI availability checks
 
 **Codex CLI:**
 ```bash
@@ -116,6 +166,10 @@ else
   CODEX_VERSION=$(codex --version 2>&1)
   CODEX_AVAILABLE=true
 fi
+
+# Run built-in Codex reviews with the dedicated review profile.
+# This keeps review effort at "high" even if the default coding profile uses "xhigh".
+CODEX_REVIEW_FLAGS="--profile review"
 ```
 
 **Gemini CLI:**
@@ -165,25 +219,87 @@ Launch **up to three review tracks** simultaneously:
 Use the Agent tool with `run_in_background: true` to launch all applicable agents simultaneously.
 
 Each agent receives:
-- PR title and description (from Step 1)
+- PR title and **`$PR_BODY` verbatim** (from Step 1c — full text, not a summary). Reviewers MUST read the body before flagging anything as "scope leak", "undocumented", "unexpected change", "unrelated refactor", etc.
+- **`## SPEC FACTS` block** (from Step 1d) — distilled wire/semantic facts extracted from external spec/design docs linked in the PR body. Reviewers MUST check every potential finding against these facts; findings that contradict the spec are auto-dropped in Step 4a.
 - `$FULL_DIFF` (the `origin/$BASE_REF...origin/$HEAD_REF` diff from Step 1b)
 - Instruction: **focus only on changed files**, not the entire codebase
+- **Exclusion list from Step 1c** with surface-neighborhood rule: list of `path:line` + summary + status (Open/Addressed) of bot comments, plus any "bot signed off on this head commit" signal. The exclusion covers the issue itself **and the same surface ±20 lines**.
+  - **Do NOT re-report a bot-flagged issue.**
+  - **Do NOT repackage** the same concern as a different finding on the same surface (e.g., bot said "missing aria-label", reviewer says "aria-label content differs across platforms" — same dialog-a11y surface, treat as overlap unless materially distinct).
+  - Only file a finding on a bot-cleared surface when the reviewer can articulate, in one line, *why the bot missed this and a human reviewer should re-examine*.
+- **Author-intent justification (mandatory for every finding)**: each finding must include a one-line "why this passed the author-intent test" — i.e., why the deliberate design choice the author may have made does NOT explain the pattern. Findings without this justification are auto-down-ranked one severity tier in Step 4.
 - LSP and AST tools available for deep analysis (`lsp_diagnostics`, `ast_grep_search`)
 - For newly introduced wrapper components or utility functions, **read their callsites** before assessing the pattern — the caller's constraints (render props, async context, platform limitations) often justify designs that look unusual in isolation
 
 ### Track B: Codex CLI Review
 
-**If `CODEX_AVAILABLE` is true**, run `codex review` in the background simultaneously with Track A:
+**If `CODEX_AVAILABLE` is true**, run `codex review` in the background simultaneously with Track A.
+
+**Timeout: 600000ms (10 minutes).** Codex review with high reasoning effort can take 5-10 minutes on large diffs. Always set `timeout: 600000` on the Bash tool call that runs `codex review`.
+
+**Important constraints:**
+- `codex review --base <branch>` diffs the **currently checked-out branch** against the given base. It does NOT support diffing two arbitrary remote refs.
+- `--base` and `[PROMPT]` arguments are **mutually exclusive** — you cannot pass custom review instructions when using `--base`.
+- `--title` can be combined with `--base`.
+
+**Execution strategy: ALWAYS use an isolated temporary worktree.** Never check out the PR branch in the current working directory — Conductor sessions and other concurrent agents share that path, and an in-place checkout would clobber their state. The temp worktree is cheap (objects are shared with the parent repo) and is removed after the review completes.
+
+> ⚠️ **Never set `CODEX_AVAILABLE=false` based on environment alone.** The temp-worktree pattern below is the *replacement* for the old "Conductor → SKIP" guard. Codex CLI must run unless the binary itself is missing, the temp-worktree creation fails, or `codex review` itself errors.
 
 ```bash
-# Use BASE_REF from Step 1a — always compare against origin refs
-# Run codex review and capture output
-codex review \
-  --base "origin/$BASE_REF" \
-  --title "[PR Title from Step 1]" \
-  "Review this PR thoroughly. Focus on: logic bugs, security issues, performance problems, API contract violations, missing error handling, and test coverage gaps. For each issue found, provide: 1) file path and line number, 2) severity (Critical/High/Medium/Low), 3) description, 4) suggested fix. Also note positive patterns worth keeping." \
-  2>&1
+# Step 1: Create an isolated temp worktree for the PR head — no in-place checkout.
+TEMP_WORKTREE="${TMPDIR:-/tmp}/review-pr-$PR_NUMBER-$$"
+WORKTREE_CREATED=false
+
+# Ensure the head ref is fetched (fast, no working-tree side effect)
+git fetch origin "$HEAD_REF":"refs/remotes/origin/$HEAD_REF" 2>/dev/null
+
+if git worktree add --detach "$TEMP_WORKTREE" "origin/$HEAD_REF" 2>/dev/null; then
+  WORKTREE_CREATED=true
+else
+  # Worktree creation failed (disk full, lock contention, etc.) — record and skip cleanly.
+  CODEX_SKIP_REASON="git worktree add failed for origin/$HEAD_REF (check disk + .git/worktrees lock)"
+fi
+
+# Cleanup trap — runs even on partial failure / interrupt
+cleanup_codex_worktree() {
+  if [ "$WORKTREE_CREATED" = true ] && [ -d "$TEMP_WORKTREE" ]; then
+    git worktree remove --force "$TEMP_WORKTREE" 2>/dev/null || rm -rf "$TEMP_WORKTREE"
+    git worktree prune 2>/dev/null
+  fi
+}
+trap cleanup_codex_worktree EXIT INT TERM
+
+# Step 2: Run codex review INSIDE the temp worktree (no current-dir checkout, no collision)
+if [ "$WORKTREE_CREATED" = true ]; then
+  # $CODEX_REVIEW_FLAGS forces the dedicated review profile.
+  # Use a subshell so `cd` doesn't leak into the parent's CWD.
+  CODEX_OUTPUT=$(
+    cd "$TEMP_WORKTREE" && \
+    codex $CODEX_REVIEW_FLAGS review \
+      --base "origin/$BASE_REF" \
+      --title "$PR_TITLE" \
+      2>&1
+  )
+  CODEX_EXIT=$?
+
+  # Step 3: Handle result
+  if [ $CODEX_EXIT -ne 0 ]; then
+    CODEX_SKIP_REASON="codex review exited $CODEX_EXIT: $(echo "$CODEX_OUTPUT" | tail -20)"
+  fi
+fi
+
+# Step 4: Cleanup runs via trap; explicit call here in success path keeps the trap idempotent.
+cleanup_codex_worktree
+trap - EXIT INT TERM
 ```
+
+**Notes on the worktree pattern:**
+- The temp worktree shares the parent repo's `.git/objects` — disk cost is the working tree only (typically a few MB to a few hundred MB).
+- `--detach` avoids creating a named branch; the worktree HEAD is a detached commit at `origin/$HEAD_REF`.
+- Cleanup uses `--force` to handle the case where `codex review` left modified files. `git worktree prune` removes any stale entries from `.git/worktrees/` if the directory was deleted out-of-band.
+- The current shell's CWD is preserved — `codex` runs in a subshell so the user's working directory is never touched.
+- Concurrent `/review-pr` runs (different PRs or sessions) get distinct temp paths via `$$` (PID).
 
 Save the Codex output to `$PLAYBOOK_DIR/codex-review.md`.
 
@@ -199,16 +315,33 @@ Reason: [CODEX_SKIP_REASON]
 - Continue with other tracks' results
 - Report the failure reason in the final report
 
+**Also check for existing Codex review comments on the PR** (from GitHub Codex bot integration):
+
+```bash
+# Fetch inline review comments left by Codex bot
+CODEX_PR_COMMENTS=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/comments" \
+  --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | {path, line: .original_line, body, commit: .original_commit_id}]' \
+  2>/dev/null)
+```
+
+When compiling the final report:
+- Include existing Codex GitHub comments alongside local Codex CLI findings
+- For each Codex GitHub comment, assess whether the PR author has already addressed it in subsequent commits (compare `commit_id` of the comment vs the latest PR commit)
+- Mark addressed comments as `[Addressed]` and unaddressed ones as `[Open]`
+- Avoid duplicating findings that overlap between Codex CLI and Codex GitHub bot
+
 ### Track C: Gemini CLI Review
 
 **If `GEMINI_AVAILABLE` is true**, run Gemini analysis in the background simultaneously with Tracks A and B.
 
+**Timeout: 600000ms (10 minutes).** Always set `timeout: 600000` on the Bash tool call that runs `gemini`.
+
 Gemini's strength is its 1M token context window — feed it the **full diff plus surrounding file contents** for holistic analysis:
 
 ```bash
-# Use --include-directories for broad context, plus the full diff
-gemini -m gemini-2.5-pro \
-  "You are reviewing a PR (origin/$BASE_REF...origin/$HEAD_REF).
+# Try gemini-2.5-pro first, fallback to gemini-2.5-flash on 429/rate-limit
+GEMINI_MODEL="gemini-2.5-pro"
+REVIEW_PROMPT="You are reviewing a PR (origin/$BASE_REF...origin/$HEAD_REF).
 
 Changed files:
 $CHANGED_FILES
@@ -224,9 +357,20 @@ Review this PR for:
 5. Performance concerns (N+1 queries, unnecessary re-renders, memory leaks)
 
 For each issue: file:line, severity (Critical/High/Medium/Low), description, suggested fix.
-Also note positive patterns worth keeping." \
-  2>&1
+Also note positive patterns worth keeping."
+
+GEMINI_OUTPUT=$(gemini -m "$GEMINI_MODEL" "$REVIEW_PROMPT" 2>&1)
+GEMINI_EXIT=$?
+if [ $GEMINI_EXIT -ne 0 ] && echo "$GEMINI_OUTPUT" | grep -qi "429\|capacity.exhausted\|rate.limit\|quota"; then
+  echo "⚠ gemini-2.5-pro rate limited, falling back to gemini-2.5-flash..."
+  GEMINI_MODEL="gemini-2.5-flash"
+  GEMINI_OUTPUT=$(gemini -m "$GEMINI_MODEL" "$REVIEW_PROMPT" 2>&1)
+  GEMINI_EXIT=$?
+fi
+echo "$GEMINI_OUTPUT"
 ```
+
+Record which model was actually used (`$GEMINI_MODEL`) for the report — either `[gemini-2.5-pro]` or `[gemini-2.5-flash (fallback)]`.
 
 Save the Gemini output to `$PLAYBOOK_DIR/gemini-review.md`.
 
@@ -243,30 +387,89 @@ Reason: [GEMINI_SKIP_REASON]
 Every issue found MUST pass these filters before being reported:
 
 1. **Practical Impact Test**: "Would this actually cause a bug or degrade UX in production?" If the effect is idempotent or the theoretical issue has no real-world consequence, downgrade to informational or omit. For `useEffect` double-invocation concerns (StrictMode, cleanup), always check whether the triggered callback is idempotent — if it is, the double-call is harmless and should not be flagged as an issue.
-2. **Author Intent Test**: Before flagging a pattern as wrong, investigate *why* the author may have written it this way. Read surrounding code (e.g., is it inside a render prop where hooks can't be called directly? Is there a platform-specific reason?). If the pattern is a deliberate, justified tradeoff, acknowledge it rather than flagging it.
+2. **Author Intent Test**: Before flagging a pattern as wrong, investigate *why* the author may have written it this way. Read surrounding code (e.g., is it inside a render prop where hooks can't be called directly? Is there a platform-specific reason?). **Read `$PR_BODY` end-to-end** — if the body explicitly calls out the change ("per Figma", "intentional non-dismissable", "removes legacy fallback"), the change is in-scope and not a side-effect. If the pattern is a deliberate, justified tradeoff, acknowledge it rather than flagging it. **Output the one-line author-intent justification with every finding** — its absence triggers an automatic severity down-rank.
 3. **YAGNI Filter**: Before suggesting abstractions, refactors, or extractions (e.g., "extract to a shared hook"), verify that the use cases are actually identical. Check if platform-specific differences, different timing requirements, or other divergences make the abstraction premature.
 4. **Devil's Advocate**: For each High/Medium issue, briefly state the strongest counter-argument the PR author might make. If the counter-argument is convincing, reconsider the severity or drop the issue.
+5. **Bot-overlap Filter**: For every finding, check the exclusion list (Step 1c). If the finding is on the same surface (path:line ±20 lines) as a Codex bot comment, you must explicitly justify *why this is materially different from the bot's framing* — not "different angle on the same dialog", but a concrete distinct defect. Failing that justification: drop the finding.
 
-## Step 4 — Cross-Validate & Aggregate Report
+## Step 4 — Cross-Validate, Verify & Aggregate Report
 
-After all tracks complete, **cross-validate findings** before compiling the final report.
+After all tracks complete, run **three sub-phases**: merge → verifier round → reviewer rebuttal. Then compile the final report. The verifier and rebuttal phases are STANDARD (not optional). Use `--fast` to skip 4b/4c when latency matters more than quality.
 
-### Cross-Validation Process
+### Step 4a — Merge & cross-validate
 
 1. **Merge findings**: Collect all issues from Claude Code agents (Track A), Codex CLI (Track B), and Gemini CLI (Track C).
 
-2. **Classify each finding by agreement level:**
+2. **Spec-contradiction drop (uses Step 1d facts)**: For every finding, check it against the `SPEC FACTS` extracted in Step 1d. A finding is **spec-contradicted** when the spec explicitly settles the question (wire format, response status, scope/filter semantics, default behavior, etc.) and the code matches the spec. Move such findings to a **`## Spec-Resolved (dropped)`** section in the final report with one-line citation of the spec passage. Do NOT include them in severity buckets. Examples of patterns that get dropped here:
+   - "API returns 204 No Content, SDK can't parse" → spec says `200 + {}` → drop
+   - "DELETE should send body, not query string" → spec says query string → drop
+   - "Parameter X scopes the operation" → spec says X is audit-only → drop
+
+3. **Deduplicate against existing PR comments**: Before classifying findings, compare each issue against the exclusion list (Codex bot comments + reviews from Step 1c) using the **surface-neighborhood rule** (±20 lines). If an issue is on the same surface as an existing bot comment:
+   - If substantially the same → **drop** and record under "Already Flagged by Codex Bot"
+   - If "different angle" without a concrete materially-distinct defect → **drop**
+   - Only retain when the reviewer's one-line justification (from Step 3 Bot-overlap Filter) shows a defect the bot truly missed
+
+4. **Apply auto-down-rank**: any finding without an author-intent justification line drops one severity tier (Critical→High, High→Medium, Medium→Low, Low→drop).
+
+5. **Classify each finding by agreement level:**
    - **Strong consensus** (2+ sources agree): High confidence — include with boosted credibility. If all 3 sources agree, mark as **unanimous**.
    - **Claude-only**: Only Claude agents found this. Assess whether the other models likely missed it (complex logic requiring deep context) or whether it might be a false positive.
    - **Codex-only**: Only Codex found this. Verify by reading the relevant code.
    - **Gemini-only**: Only Gemini found this. Gemini's large context may catch cross-file issues others miss, but verify specificity — Gemini can be broad.
    - **Contradicted**: Two or more sources disagree on the same code section. **Investigate the actual code** to determine which assessment is correct. State which reviewer(s) were right and why.
 
-3. **Accuracy judgment**: For each non-corroborated finding, add a brief accuracy assessment:
+6. **Accuracy judgment**: For each non-corroborated finding, add a brief accuracy assessment:
    - `[Verified]` — manually confirmed by reading the code
    - `[Likely valid]` — consistent with codebase patterns but not manually verified
    - `[Questionable]` — may be a false positive; include the counter-argument
    - `[Dismissed]` — determined to be incorrect after investigation; explain why
+
+### Step 4b — Verifier round (cross-model devil's advocate)
+
+Pass the merged finding list to a **different model than the originator** and ask for keep/drop verdicts. Goal: catch over-flagging by reviewers who default to "log if uncertain".
+
+**Verifier model selection** (reverse the strongest reviewer to avoid self-validation):
+- If Track A (Claude agents) produced most findings → verifier = Codex CLI (`codex --profile review exec`) when available, else Gemini
+- If Track B (Codex CLI) was the dominant source → verifier = Claude opus via `Agent(subagent_type="oh-my-claudecode:critic", model="opus")`
+- If only one source ran → verifier = the strongest available alternative
+
+**Verifier input** (pass *everything*):
+- All findings from Step 4a (with severity, source attribution, author-intent justification)
+- `$PR_BODY` verbatim
+- The exclusion list from Step 1c (so verifier can flag missed bot-overlaps)
+- Latest commit SHA + relevant file contents (read via `gh api .../contents/<path>?ref=$LATEST_HEAD_SHA`)
+
+**Verifier asks for each finding**:
+1. **Verdict**: AGREE / PARTIAL / DISAGREE
+2. **Severity adjustment**: keep / upgrade / downgrade
+3. **Bot-overlap**: duplicate / partial / separate
+4. **One-line counter-argument** the PR author could reasonably make
+5. **Recommendation**: keep / drop / merge with another finding
+
+**Apply verifier verdicts**:
+- DISAGREE + drop → move to "Verifier-dropped" section (kept in report for trail, NOT in main severity buckets)
+- AGREE → keep as-is
+- PARTIAL → apply severity adjustment
+- Save verifier output to `$PLAYBOOK_DIR/verifier-output.md`
+
+Timeout: 600000ms. If verifier fails (rate-limit, network, etc.), record `VERIFIER_SKIP_REASON` and continue with Step 4a output as-is — do NOT silently keep all findings as if verified.
+
+### Step 4c — Reviewer rebuttal (mini-loop)
+
+For findings the verifier dropped that meet **any** of these criteria:
+- Marked **unanimous** (all 3 sources agreed) in Step 4a, OR
+- Severity was **Critical** before any down-ranking, OR
+- Tagged `[Verified]` (manually confirmed by reading code)
+
+Send a one-shot rebuttal request back to the original reviewer source: "Verifier dropped this with reason X. Can you point to a concrete defect in the latest commit, or do you concede?"
+
+- If reviewer concedes → finding stays dropped
+- If reviewer points to concrete code evidence → finding is **reinstated** with note `[Reinstated after rebuttal]` and the verifier's counter recorded
+
+This loop runs **once**, not iteratively. Save rebuttal exchanges to `$PLAYBOOK_DIR/rebuttal-output.md`.
+
+Skip 4c when `--no-rebuttal` flag is passed or when 4b was skipped.
 
 ### Unified Report Format
 
@@ -278,8 +481,10 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 | Source | Status | Notes |
 |--------|--------|-------|
 | Claude Code (specialist agents) | Completed | [list of agents used] |
-| Codex CLI | Completed / SKIPPED | [version or skip reason] |
-| Gemini CLI | Completed / SKIPPED | [version or skip reason] |
+| Codex CLI | Completed / SKIPPED | [version or skip reason — note Conductor-skip if applicable] |
+| Gemini CLI | Completed / SKIPPED | [gemini-2.5-pro] or [gemini-2.5-flash (fallback)] or [skip reason] |
+| **Verifier (Step 4b)** | Completed / SKIPPED | [model used + drop count] |
+| **Reviewer rebuttal (Step 4c)** | Completed / SKIPPED | [reinstate count] |
 
 ## Review Matrix
 | Reviewer         | Verdict           | Critical | High | Medium | Low |
@@ -302,6 +507,13 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 - **Gemini-only findings**: X issues (Y verified, Z questionable)
 - **Contradictions resolved**: X (explain which source was correct per issue)
 
+## Existing Codex Bot Comments (pre-review)
+| # | File:Line | Summary | Status |
+|---|-----------|---------|--------|
+| 1 | `file.ts:42` | [brief summary of bot comment] | Open / Addressed |
+
+> These issues were already flagged by the Codex bot on the PR and are excluded from new findings below.
+
 ---
 
 ## 🔴 Critical Issues (must fix before merge)
@@ -319,10 +531,21 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 ## 🔵 Design Choices (informational)
 - [Patterns that look unusual but appear intentional — describe the tradeoff rather than prescribing a change]
 
+## ⚪️ Spec-Resolved (dropped in Step 4a)
+- `file.ts:N` — [original finding] — **Source:** [reviewer] — **Spec citation:** [one-line quote from $PLAYBOOK_DIR/specs/* that settles the question]
+> Findings auto-dropped because the linked spec explicitly settles them (wire format, response status, scope semantics, etc.). Kept here for transparency.
+
+## 🟣 Verifier-dropped Findings (decision trail)
+- `file.ts:N` — [original finding] — **Verifier reason:** [why dropped] — **Original source:** [reviewer]
+> These are kept for transparency, NOT requested as changes. If the verifier was wrong, see Reinstated below.
+
+## ♻️ Reinstated After Rebuttal (Step 4c)
+- `file.ts:N` — [finding] — **Verifier dropped because:** [X] — **Reviewer reinstated because:** [concrete evidence Y]
+
 ---
 
 ## Final Verdict: APPROVE / REQUEST CHANGES / COMMENT
-[1-2 sentence rationale based on highest severity found, noting cross-validation confidence level]
+[1-2 sentence rationale based on highest severity found AFTER verifier+rebuttal. Cite cross-validation confidence: "verified by N/M sources, M-N dropped by verifier".]
 ```
 
 ## Step 5 — Apply Local Fixes
@@ -367,10 +590,19 @@ If either CLI is not available, the skill works with whichever sources are prese
 ## Usage
 
 ```
-/review-pr                       # review current branch's PR
+/review-pr                       # review current branch's PR (full pipeline: 4a + 4b + 4c)
 /review-pr 731                   # review PR #731
 /review-pr security              # security-focused review only
-/review-pr --no-fix              # analysis only, skip local fixes
+/review-pr --no-fix              # analysis only, skip Step 5 local fixes
+/review-pr --fast                # skip Step 4b verifier + 4c rebuttal (~10min faster, more noise)
+/review-pr --no-rebuttal         # run verifier (4b) but skip rebuttal mini-loop (4c)
 /review-pr remote test-check     # review remote branch's PR (no local checkout needed)
 /review-pr 731 security          # review PR #731, security focus only
 ```
+
+### Flag parsing addendum (extend Step 1a)
+
+| `$ARGUMENTS` pattern | Action |
+|---|---|
+| Contains `--fast` | Set `FAST=true` → Step 4b and 4c are skipped. Strip flag, continue parsing. |
+| Contains `--no-rebuttal` | Set `NO_REBUTTAL=true` → Step 4c is skipped. Strip flag, continue parsing. |

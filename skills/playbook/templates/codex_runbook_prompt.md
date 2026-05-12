@@ -20,7 +20,7 @@ AVAILABLE CLAUDE CODE SKILLS INVENTORY:
 
 CODEX / GEMINI ROUTING TABLE (mandatory — apply during Skill Orchestration):
 <<<
-Codex (/oh-my-claudecode:ask-codex, model: gpt-5.4 xhigh) — REQUIRED for these step types:
+Codex (/oh-my-claudecode:ask-codex, profile: coding) — REQUIRED for these step types:
 - Architecture review, system design, module boundary analysis
 - Planning validation, runbook critique, sanity checks
 - Security audit, trust boundaries, auth flows, injection risks
