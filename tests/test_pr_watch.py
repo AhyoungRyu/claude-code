@@ -117,6 +117,49 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("codex-abc", bind_result["binding"]["session_id"])
             self.assertEqual([], inbox_result["events"])
 
+    def test_mcp_notify_and_list_notifications_share_watcher_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import list_notifications, notify
+
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+
+            notify_result = notify(inbox_item.event_id, mode="browser", state_dir=tmpdir)
+            notifications_result = list_notifications(state_dir=tmpdir)
+
+            self.assertEqual("notified", notify_result["action"])
+            self.assertEqual(["browser"], notify_result["channels"])
+            self.assertEqual(1, len(notifications_result["notifications"]))
+            self.assertEqual("browser", notifications_result["notifications"][0]["channel"])
+
     def test_author_feedback_events_are_actionable_and_deduped(self):
         pr = {
             "owner": "sendbird",
@@ -323,6 +366,97 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("queued", result.action)
             self.assertTrue(store.get_binding(inbox_item.binding_id).confirmed)
 
+    def test_desktop_notification_does_not_resume_or_queue(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.notifications import RecordingNotifier, notify_event
+
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+            notifier = RecordingNotifier()
+
+            result = notify_event(store, inbox_item.event_id, mode="desktop", notifier=notifier)
+            stored = store.get_event(inbox_item.event_id)
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual(["desktop"], result.channels)
+            self.assertEqual(1, len(notifier.messages))
+            self.assertEqual([], store.list_queue())
+            self.assertEqual("pending", stored.status)
+            self.assertEqual("awaiting_approval", stored.delivery_status)
+
+    def test_browser_notification_creates_pending_outbox_without_approval(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.notifications import notify_event
+
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+
+            result = notify_event(store, inbox_item.event_id, mode="browser")
+            notifications = store.list_notifications()
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual(1, len(notifications))
+            self.assertEqual("browser", notifications[0].channel)
+            self.assertEqual("pending", notifications[0].status)
+            self.assertEqual(PR_URL, notifications[0].target_url)
+            self.assertEqual("pending", store.get_event(inbox_item.event_id).status)
+
     def test_low_confidence_event_stays_in_inbox_without_waking_session(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
@@ -406,6 +540,60 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual([], runner.commands)
             self.assertEqual(1, len(store.list_queue()))
             self.assertEqual("queued", store.get_event(inbox_item.event_id).status)
+
+    def test_poll_once_fans_out_notifications_without_approving_delivery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.notifications import RecordingNotifier
+
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                      {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z"
+                      }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            notifier = RecordingNotifier()
+
+            items = poll_once(
+                store,
+                "irene",
+                fixture=str(fixture),
+                sessions=[],
+                notification_mode="desktop",
+                notifier=notifier,
+            )
+
+            self.assertEqual(1, len(items))
+            self.assertEqual(1, len(notifier.messages))
+            self.assertEqual([], store.list_queue())
+            self.assertEqual("awaiting_approval", store.get_event(items[0].event_id).delivery_status)
 
     def test_idle_resume_failure_preserves_inbox_item_with_recovery_command(self):
         with tempfile.TemporaryDirectory() as tmpdir:

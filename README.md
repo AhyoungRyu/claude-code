@@ -25,6 +25,7 @@ pr-watch bind https://github.com/owner/name/pull/1049 --role reviewer --agent co
 pr-watch approve <event-id>
 pr-watch queue
 pr-watch config set busy_policy run_if_idle_queue_if_busy
+pr-watch config set notification_mode desktop
 pr-watch mcp
 ```
 
@@ -52,7 +53,21 @@ pr-watch-mcp
 ```
 
 The MCP server exposes the same local state and approval flow as the CLI:
-`poll_once`, `list_inbox`, `bind_pr`, `approve`, `list_queue`, and `doctor`.
+`poll_once`, `list_inbox`, `bind_pr`, `approve`, `notify`,
+`list_notifications`, `list_queue`, and `doctor`.
+
+Notifications are independent from resume/queue. Set `notification_mode` to
+`none`, `desktop`, `browser`, or `both` to fan out notifications when polling:
+
+```bash
+pr-watch daemon --once --repo owner/name --notification-mode desktop
+pr-watch notify <event-id> --mode browser
+pr-watch notifications
+```
+
+The `desktop` channel uses the local macOS notification bridge. The `browser`
+channel writes a local notification outbox that browser or MCP clients can
+consume without approving, resuming, or queueing the agent session.
 
 The MVP deliberately does not depend on Conductor internals or any shared
 webhook service. Low-confidence events stay in the inbox, first inferred

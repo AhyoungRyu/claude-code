@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .models import Binding, ClassifiedEvent, InboxItem, QueueItem
+from .models import Binding, ClassifiedEvent, InboxItem, NotificationItem, QueueItem
 from .util import dumps, loads_dict, random_id, utc_now
 
 
@@ -81,6 +81,22 @@ class StateStore:
                   created_at text not null,
                   updated_at text not null
                 );
+
+                create table if not exists notifications (
+                  notification_id text primary key,
+                  event_id text not null,
+                  channel text not null,
+                  title text not null,
+                  message text not null,
+                  target_url text not null,
+                  status text not null,
+                  error text not null default '',
+                  created_at text not null,
+                  updated_at text not null,
+                  unique(event_id, channel)
+                );
+                create index if not exists idx_notifications_status
+                  on notifications(status);
                 """
             )
 
@@ -382,6 +398,67 @@ class StateStore:
             rows = conn.execute("select * from queue where status = 'queued' order by created_at").fetchall()
         return [_queue_from_row(row) for row in rows]
 
+    def upsert_notification(
+        self,
+        event_id: str,
+        channel: str,
+        title: str,
+        message: str,
+        target_url: str,
+        status: str,
+        error: str = "",
+    ) -> NotificationItem:
+        now = utc_now()
+        existing = self.get_notification(event_id, channel)
+        notification_id = existing.notification_id if existing else random_id("note")
+        created_at = existing.created_at if existing else now
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into notifications (
+                  notification_id, event_id, channel, title, message,
+                  target_url, status, error, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(event_id, channel) do update set
+                  title=excluded.title,
+                  message=excluded.message,
+                  target_url=excluded.target_url,
+                  status=excluded.status,
+                  error=excluded.error,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    notification_id,
+                    event_id,
+                    channel,
+                    title,
+                    message,
+                    target_url,
+                    status,
+                    error,
+                    created_at,
+                    now,
+                ),
+            )
+        return self.get_notification(event_id, channel)
+
+    def get_notification(self, event_id: str, channel: str) -> Optional[NotificationItem]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select * from notifications where event_id = ? and channel = ?",
+                (event_id, channel),
+            ).fetchone()
+        return _notification_from_row(row) if row else None
+
+    def list_notifications(self, include_done: bool = False) -> List[NotificationItem]:
+        query = "select * from notifications"
+        if not include_done:
+            query += " where status in ('pending', 'failed')"
+        query += " order by updated_at desc"
+        with self.connect() as conn:
+            rows = conn.execute(query).fetchall()
+        return [_notification_from_row(row) for row in rows]
+
 
 def _binding_from_row(row: sqlite3.Row) -> Binding:
     return Binding(
@@ -438,6 +515,21 @@ def _queue_from_row(row: sqlite3.Row) -> QueueItem:
         command=json.loads(row["command_json"]),
         prompt=row["prompt"],
         status=row["status"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _notification_from_row(row: sqlite3.Row) -> NotificationItem:
+    return NotificationItem(
+        notification_id=row["notification_id"],
+        event_id=row["event_id"],
+        channel=row["channel"],
+        title=row["title"],
+        message=row["message"],
+        target_url=row["target_url"],
+        status=row["status"],
+        error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

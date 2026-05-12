@@ -10,6 +10,7 @@ from typing import List, Optional
 from .config import config_bool, load_config, set_config_value, state_db_path
 from .delivery import approve_event
 from .github import current_user, daemon_loop, poll_once
+from .notifications import VALID_NOTIFICATION_MODES, notify_event
 from .sessions import discover_sessions
 from .state import StateStore
 from .workflow import create_explicit_binding
@@ -47,6 +48,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if args.include_drafts is not None
                 else config_bool(config, "include_drafts", default=False)
             )
+            notification_mode = args.notification_mode or config.get("notification_mode", "none")
             sessions = discover_sessions()
             if args.once:
                 items = poll_once(
@@ -56,6 +58,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     fixture=args.fixture,
                     sessions=sessions,
                     include_drafts=include_drafts,
+                    notification_mode=notification_mode,
                 )
                 print(f"recorded {len(items)} actionable event(s)")
                 return 0
@@ -68,6 +71,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 sessions=sessions,
                 interval_seconds=interval,
                 include_drafts=include_drafts,
+                notification_mode=notification_mode,
             )
             return 0
         if args.command == "inbox":
@@ -93,6 +97,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             store = StateStore(state_db_path(args.state_dir))
             for item in store.list_queue():
                 print(f"{item.queue_id}\t{item.event_id}\t{item.status}\t{' '.join(item.command[:-1])} <prompt>")
+            return 0
+        if args.command == "notify":
+            store = StateStore(state_db_path(args.state_dir))
+            config = load_config(args.state_dir)
+            mode = args.mode or config.get("notification_mode", "desktop")
+            result = notify_event(store, args.event_id, mode=mode, force=args.force)
+            print(f"{result.action}: {args.event_id}")
+            if result.channels:
+                print("channels:", ", ".join(result.channels))
+            if result.message:
+                print(result.message)
+            return 0 if result.action != "failed" else 2
+        if args.command == "notifications":
+            store = StateStore(state_db_path(args.state_dir))
+            print_notifications(store, include_done=args.all)
             return 0
         if args.command == "config":
             path = set_config_value(args.key, args.value, args.state_dir)
@@ -130,6 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="also watch draft pull requests; default is config include_drafts=false",
     )
+    daemon.add_argument(
+        "--notification-mode",
+        choices=sorted(VALID_NOTIFICATION_MODES),
+        help="send independent notifications for recorded events; default is config notification_mode=none",
+    )
 
     inbox = subparsers.add_parser("inbox", help="show pending PR events")
     inbox.add_argument("--all", action="store_true", help="include delivered and dismissed items")
@@ -153,6 +177,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("queue", help="show queued resume commands")
+
+    notify = subparsers.add_parser("notify", help="send an independent notification for an inbox event")
+    notify.add_argument("event_id")
+    notify.add_argument("--mode", choices=sorted(VALID_NOTIFICATION_MODES))
+    notify.add_argument("--force", action="store_true", help="send again even if this event/channel was notified")
+
+    notifications = subparsers.add_parser("notifications", help="show browser notification outbox and failures")
+    notifications.add_argument("--all", action="store_true", help="include sent desktop notifications")
 
     config = subparsers.add_parser("config", help="configure pr-watch")
     config_sub = config.add_subparsers(dest="config_command")
@@ -186,6 +218,17 @@ def print_inbox(store: StateStore, include_done: bool = False) -> None:
             print("  error:", item.error)
 
 
+def print_notifications(store: StateStore, include_done: bool = False) -> None:
+    notifications = store.list_notifications(include_done=include_done)
+    if not notifications:
+        print("No notifications.")
+        return
+    for item in notifications:
+        print(f"{item.notification_id}\t{item.status}\t{item.channel}\t{item.event_id}\t{item.title}")
+        if item.error:
+            print("  error:", item.error)
+
+
 def current_branch() -> str:
     result = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True, check=False)
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -196,7 +239,8 @@ def doctor(state_dir: Optional[str]) -> int:
     print(f"state: {state_db_path(state_dir)}")
     print(f"busy_policy: {config.get('busy_policy')}")
     print(f"include_drafts: {config.get('include_drafts')}")
-    for executable in ["gh", "claude", "codex"]:
+    print(f"notification_mode: {config.get('notification_mode')}")
+    for executable in ["gh", "claude", "codex", "osascript"]:
         path = shutil.which(executable)
         print(f"{executable}: {path or 'not found'}")
     if shutil.which("gh"):

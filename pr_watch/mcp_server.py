@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from .config import config_bool, load_config, state_db_path
 from .delivery import approve_event
 from .github import current_user, poll_once as github_poll_once
+from .notifications import notify_event
 from .sessions import discover_sessions
 from .state import StateStore
 from .workflow import create_explicit_binding
@@ -22,6 +23,7 @@ def poll_once(
     user: Optional[str] = None,
     state_dir: Optional[str] = None,
     include_drafts: Optional[bool] = None,
+    notification_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Poll GitHub once and record actionable PR events."""
     state_dir = _effective_state_dir(state_dir)
@@ -29,6 +31,7 @@ def poll_once(
     should_include_drafts = (
         include_drafts if include_drafts is not None else config_bool(config, "include_drafts", default=False)
     )
+    selected_notification_mode = notification_mode or config.get("notification_mode", "none")
     store = StateStore(state_db_path(state_dir))
     items = github_poll_once(
         store,
@@ -37,11 +40,19 @@ def poll_once(
         fixture=fixture,
         sessions=discover_sessions(),
         include_drafts=should_include_drafts,
+        notification_mode=selected_notification_mode,
     )
+    item_ids = {item.event_id for item in items}
     return {
         "count": len(items),
         "include_drafts": should_include_drafts,
+        "notification_mode": selected_notification_mode,
         "events": [_to_json(item) for item in items],
+        "notifications": [
+            _to_json(item)
+            for item in store.list_notifications(include_done=True)
+            if item.event_id in item_ids
+        ],
     }
 
 
@@ -99,11 +110,32 @@ def approve(
     return _to_json(result)
 
 
+def notify(
+    event_id: str,
+    mode: Optional[str] = None,
+    force: bool = False,
+    state_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send an independent notification for an inbox event."""
+    state_dir = _effective_state_dir(state_dir)
+    config = load_config(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = notify_event(store, event_id, mode=mode or config.get("notification_mode", "desktop"), force=force)
+    return _to_json(result)
+
+
 def list_queue(state_dir: Optional[str] = None) -> Dict[str, Any]:
     """List queued resume commands."""
     state_dir = _effective_state_dir(state_dir)
     store = StateStore(state_db_path(state_dir))
     return {"queue": [_to_json(item) for item in store.list_queue()]}
+
+
+def list_notifications(state_dir: Optional[str] = None, include_done: bool = False) -> Dict[str, Any]:
+    """List pending browser notifications and failed notification attempts."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    return {"notifications": [_to_json(item) for item in store.list_notifications(include_done=include_done)]}
 
 
 def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -118,7 +150,8 @@ def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
         "state": str(state_db_path(state_dir)),
         "busy_policy": config.get("busy_policy"),
         "include_drafts": config.get("include_drafts"),
-        "executables": {name: shutil.which(name) for name in ["gh", "claude", "codex"]},
+        "notification_mode": config.get("notification_mode"),
+        "executables": {name: shutil.which(name) for name in ["gh", "claude", "codex", "osascript"]},
         "gh_auth": gh_auth,
         "conductor": "optional, not required",
     }
@@ -132,7 +165,9 @@ def build_server() -> Any:
     server.tool()(list_inbox)
     server.tool()(bind_pr)
     server.tool()(approve)
+    server.tool()(notify)
     server.tool()(list_queue)
+    server.tool()(list_notifications)
     server.tool()(doctor)
     return server
 

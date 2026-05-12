@@ -101,8 +101,30 @@ class QueueItem:
 
 
 @dataclass(frozen=True)
+class NotificationItem:
+    notification_id: str
+    event_id: str
+    channel: str
+    title: str
+    message: str
+    target_url: str
+    status: str
+    error: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     action: str
     event_id: str
     command: List[str] = field(default_factory=list)
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class NotificationResult:
+    action: str
+    event_id: str
+    channels: List[str] = field(default_factory=list)
     message: str = ""

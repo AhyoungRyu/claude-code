@@ -9,6 +9,7 @@ DEFAULT_CONFIG = {
     "busy_policy": "run_if_idle_queue_if_busy",
     "default_delivery": "confirm_first",
     "include_drafts": "false",
+    "notification_mode": "none",
 }
 
 

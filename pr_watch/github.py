@@ -9,6 +9,7 @@ from typing import Iterable, List, Optional, Set
 
 from .classifier import classify_pr
 from .models import InboxItem, SessionInfo
+from .notifications import notify_events
 from .state import StateStore
 from .workflow import route_event
 
@@ -153,6 +154,8 @@ def poll_once(
     fixture: Optional[str] = None,
     sessions: Optional[Iterable[SessionInfo]] = None,
     include_drafts: bool = False,
+    notification_mode: str = "none",
+    notifier: Optional[object] = None,
 ) -> List[InboxItem]:
     if fixture:
         prs = load_fixture(fixture)
@@ -168,6 +171,7 @@ def poll_once(
             continue
         for event in classify_pr(pr, current_user_login):
             routed.append(route_event(store, event, session_list))
+    notify_events(store, routed, mode=notification_mode, notifier=notifier)
     return routed
 
 
@@ -179,6 +183,7 @@ def daemon_loop(
     sessions: Optional[Iterable[SessionInfo]],
     interval_seconds: int,
     include_drafts: bool = False,
+    notification_mode: str = "none",
 ) -> None:
     while True:
         poll_once(
@@ -188,5 +193,6 @@ def daemon_loop(
             fixture=fixture,
             sessions=sessions,
             include_drafts=include_drafts,
+            notification_mode=notification_mode,
         )
         time.sleep(interval_seconds)
