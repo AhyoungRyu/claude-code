@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-watch"
+version = "0.1.0"
+description = "Local-first PR session watcher for Claude Code and Codex sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Claude Code Skills Maintainers" }]
+dependencies = []
+
+[project.scripts]
+pr-watch = "pr_watch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pr_watch*"]

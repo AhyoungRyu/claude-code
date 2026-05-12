@@ -1,1 +1,4 @@
 .omc/**
+.venv/
+*.egg-info/
+__pycache__/

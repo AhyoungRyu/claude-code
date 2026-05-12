@@ -1,0 +1,18 @@
+[
+  {
+    "owner": "sendbird",
+    "repo": "ai-agent-js",
+    "number": 1049,
+    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+    "author": { "login": "teammate" },
+    "latestReviews": [
+      {
+        "author": { "login": "irene" },
+        "state": "COMMENTED",
+        "submittedAt": "2026-05-11T09:00:00Z"
+      }
+    ],
+    "lastPushedAt": "2026-05-11T10:00:00Z",
+    "updatedAt": "2026-05-11T10:00:00Z"
+  }
+]
