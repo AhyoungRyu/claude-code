@@ -24,8 +24,9 @@ pr-watch inbox
 pr-watch bind https://github.com/owner/name/pull/1049 --role reviewer --agent codex --session-id <session-id>
 pr-watch approve <event-id>
 pr-watch queue
+pr-watch init --profile terminal
 pr-watch config set busy_policy run_if_idle_queue_if_busy
-pr-watch config set notification_mode desktop
+pr-watch config set notification_mode auto
 pr-watch mcp
 ```
 
@@ -54,20 +55,31 @@ pr-watch-mcp
 
 The MCP server exposes the same local state and approval flow as the CLI:
 `poll_once`, `list_inbox`, `bind_pr`, `approve`, `notify`,
-`list_notifications`, `list_queue`, and `doctor`.
+`list_notifications`, `list_queue`, and `doctor`. It also exposes user-facing
+aliases such as `check_pr_updates`, `show_pending_pr_actions`,
+`approve_resume_session`, `queue_resume_session`, `show_in_app_notifications`,
+and `ack_notification`.
 
 Notifications are independent from resume/queue. Set `notification_mode` to
-`none`, `desktop`, `browser`, or `both` to fan out notifications when polling:
+`auto`, `none`, `desktop`, `in_app`, or `both` to fan out notifications when
+polling:
 
 ```bash
+pr-watch init --profile terminal      # desktop notifications for CLI users
+pr-watch init --profile conductor     # in-app inbox for Conductor hosts
+pr-watch init --profile app           # in-app inbox for app/MCP hosts
 pr-watch daemon --once --repo owner/name --notification-mode desktop
-pr-watch notify <event-id> --mode browser
+pr-watch notify <event-id> --mode in_app
 pr-watch notifications
 ```
 
-The `desktop` channel uses the local macOS notification bridge. The `browser`
-channel writes a local notification outbox that browser or MCP clients can
-consume without approving, resuming, or queueing the agent session.
+The default `auto` mode resolves to `in_app` for app-style hosts such as MCP,
+Conductor, or Codex App adapters, and to `desktop` for plain macOS terminal
+usage. The `desktop` channel uses the local macOS notification bridge. The
+`in_app` channel writes a durable local notification inbox that MCP, Codex App,
+or Conductor adapters can consume without approving, resuming, or queueing the
+agent session. The old `browser` value is still accepted as a legacy alias for
+`in_app`.
 
 The MVP deliberately does not depend on Conductor internals or any shared
 webhook service. Low-confidence events stay in the inbox, first inferred

@@ -83,6 +83,7 @@ class InboxItem:
     binding_id: Optional[str]
     confidence: str
     evidence: List[str] = field(default_factory=list)
+    payload: Dict[str, Any] = field(default_factory=dict)
     recovery_command: str = ""
     error: str = ""
     created_at: str = ""

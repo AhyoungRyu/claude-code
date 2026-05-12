@@ -6,9 +6,11 @@ from pathlib import Path
 
 from pr_watch.classifier import classify_pr
 from pr_watch.cli import main
+from pr_watch.config import load_config
 from pr_watch.delivery import CommandResult, RecordingRunner, approve_event
-from pr_watch.github import GH_PR_FIELDS, poll_once
+from pr_watch.github import GH_PR_FIELDS, enrich_pull_request_metadata, poll_once
 from pr_watch.models import SessionInfo
+from pr_watch.notifications import resolve_notification_mode
 from pr_watch.sessions import discover_sessions
 from pr_watch.state import StateStore
 from pr_watch.workflow import create_explicit_binding, route_event
@@ -27,6 +29,42 @@ class PrWatchTests(unittest.TestCase):
 
     def test_github_polling_requests_draft_status(self):
         self.assertIn("isDraft", GH_PR_FIELDS.split(","))
+
+    def test_github_polling_requests_commits_for_reviewer_push_detection(self):
+        self.assertIn("commits", GH_PR_FIELDS.split(","))
+
+    def test_github_polling_derives_last_pushed_at_from_commits(self):
+        prs = [
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "commits": [
+                    {"committedDate": "2026-05-11T09:00:00Z"},
+                    {"committedDate": "2026-05-11T10:30:00Z"},
+                ],
+            }
+        ]
+
+        enrich_pull_request_metadata(prs, "sendbird/ai-agent-js")
+
+        self.assertEqual("2026-05-11T10:30:00Z", prs[0]["lastPushedAt"])
+
+    def test_auto_notification_mode_prefers_in_app_for_app_hosts(self):
+        self.assertEqual(
+            "in_app",
+            resolve_notification_mode("auto", host="conductor", platform_name="Darwin"),
+        )
+        self.assertEqual(
+            "in_app",
+            resolve_notification_mode("auto", host="codex_app", platform_name="Darwin"),
+        )
+
+    def test_auto_notification_mode_uses_desktop_for_plain_macos_terminal(self):
+        self.assertEqual("desktop", resolve_notification_mode("auto", platform_name="Darwin"))
+
+    def test_browser_notification_mode_is_legacy_alias_for_in_app(self):
+        self.assertEqual("in_app", resolve_notification_mode("browser", platform_name="Darwin"))
 
     def test_poll_once_skips_draft_prs_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -152,13 +190,56 @@ class PrWatchTests(unittest.TestCase):
             )[0]
             inbox_item = route_event(store, event, sessions=[])
 
-            notify_result = notify(inbox_item.event_id, mode="browser", state_dir=tmpdir)
+            notify_result = notify(inbox_item.event_id, mode="in_app", state_dir=tmpdir)
             notifications_result = list_notifications(state_dir=tmpdir)
 
             self.assertEqual("notified", notify_result["action"])
-            self.assertEqual(["browser"], notify_result["channels"])
+            self.assertEqual(["in_app"], notify_result["channels"])
             self.assertEqual(1, len(notifications_result["notifications"]))
-            self.assertEqual("browser", notifications_result["notifications"][0]["channel"])
+            self.assertEqual("in_app", notifications_result["notifications"][0]["channel"])
+
+    def test_mcp_notification_ack_marks_in_app_item_done(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import ack_notification, list_notifications, notify
+
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+            notify(inbox_item.event_id, mode="in_app", state_dir=tmpdir)
+            notification_id = list_notifications(state_dir=tmpdir)["notifications"][0]["notification_id"]
+
+            ack_result = ack_notification(notification_id=notification_id, state_dir=tmpdir)
+
+            self.assertEqual("acked", ack_result["action"])
+            self.assertEqual([], list_notifications(state_dir=tmpdir)["notifications"])
+            self.assertEqual(1, len(list_notifications(state_dir=tmpdir, include_done=True)["notifications"]))
 
     def test_author_feedback_events_are_actionable_and_deduped(self):
         pr = {
@@ -412,7 +493,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("pending", stored.status)
             self.assertEqual("awaiting_approval", stored.delivery_status)
 
-    def test_browser_notification_creates_pending_outbox_without_approval(self):
+    def test_in_app_notification_creates_pending_item_without_approval(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from pr_watch.notifications import notify_event
 
@@ -447,15 +528,81 @@ class PrWatchTests(unittest.TestCase):
             )[0]
             inbox_item = route_event(store, event, sessions=[])
 
-            result = notify_event(store, inbox_item.event_id, mode="browser")
+            result = notify_event(store, inbox_item.event_id, mode="in_app")
             notifications = store.list_notifications()
 
             self.assertEqual("notified", result.action)
             self.assertEqual(1, len(notifications))
-            self.assertEqual("browser", notifications[0].channel)
+            self.assertEqual("in_app", notifications[0].channel)
             self.assertEqual("pending", notifications[0].status)
             self.assertEqual(PR_URL, notifications[0].target_url)
             self.assertEqual("pending", store.get_event(inbox_item.event_id).status)
+
+    def test_polling_existing_queued_event_does_not_reset_delivery_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+            approve_event(store, inbox_item.event_id, session_state="unknown")
+
+            rerouted = route_event(store, event, sessions=[])
+
+            self.assertEqual("queued", rerouted.status)
+            self.assertEqual("queued", rerouted.delivery_status)
+            self.assertEqual("queued", store.get_event(inbox_item.event_id).status)
+
+    def test_inbox_items_include_event_payload_for_mcp_clients(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "irene"},
+                    "reviewDecision": "CHANGES_REQUESTED",
+                    "latestReviews": [
+                        {
+                            "author": {"login": "teammate"},
+                            "state": "CHANGES_REQUESTED",
+                            "submittedAt": "2026-05-11T10:00:00Z",
+                        }
+                    ],
+                    "updatedAt": "2026-05-11T10:03:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+
+            self.assertEqual("CHANGES_REQUESTED", inbox_item.payload["reviewDecision"])
 
     def test_low_confidence_event_stays_in_inbox_without_waking_session(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -728,6 +875,92 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(0, approve_code)
             self.assertEqual("queued", store.get_event(event_id).status)
             self.assertEqual(1, len(store.list_queue()))
+
+    def test_mcp_user_friendly_aliases_delegate_to_core_actions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import (
+                approve_resume_session,
+                bind_pr,
+                check_pr_updates,
+                queue_resume_session,
+                show_in_app_notifications,
+                show_pending_pr_actions,
+            )
+
+            bind_pr(
+                pr=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                state_dir=tmpdir,
+            )
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                      {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z"
+                      }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+
+            updates = check_pr_updates(
+                fixture=str(fixture),
+                user="irene",
+                notification_mode="in_app",
+                state_dir=tmpdir,
+            )
+            inbox = show_pending_pr_actions(state_dir=tmpdir)
+            notifications = show_in_app_notifications(state_dir=tmpdir)
+            event_id = inbox["events"][0]["event_id"]
+            notify_only = approve_resume_session(
+                event_id=event_id,
+                session_state="working",
+                busy_policy="notify_only",
+                state_dir=tmpdir,
+            )
+            queued = queue_resume_session(event_id=event_id, state_dir=tmpdir)
+
+            self.assertEqual(["author_push_after_review"], [event["event_type"] for event in updates["events"]])
+            self.assertEqual(1, len(notifications["notifications"]))
+            self.assertEqual("notify_only", notify_only["action"])
+            self.assertEqual("queued", queued["action"])
+
+    def test_cli_init_profiles_set_host_appropriate_notification_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with redirect_stdout(StringIO()):
+                terminal_code = main(["--state-dir", tmpdir, "init", "--profile", "terminal"])
+            self.assertEqual(0, terminal_code)
+            self.assertEqual("desktop", load_config(tmpdir)["notification_mode"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with redirect_stdout(StringIO()):
+                conductor_code = main(["--state-dir", tmpdir, "init", "--profile", "conductor"])
+            self.assertEqual(0, conductor_code)
+            self.assertEqual("in_app", load_config(tmpdir)["notification_mode"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with redirect_stdout(StringIO()):
+                app_code = main(["--state-dir", tmpdir, "init", "--profile", "app"])
+            self.assertEqual(0, app_code)
+            self.assertEqual("in_app", load_config(tmpdir)["notification_mode"])
 
     def test_session_discovery_reads_claude_and_codex_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -269,6 +269,11 @@ class StateStore:
         existing = self.find_event_by_dedupe(event.dedupe_key)
         event_id = existing.event_id if existing else random_id("evt")
         created_at = existing.created_at if existing else now
+        next_status = status
+        next_delivery_status = delivery_status
+        if existing and _should_preserve_delivery_state(existing):
+            next_status = existing.status
+            next_delivery_status = existing.delivery_status
         with self.connect() as conn:
             conn.execute(
                 """
@@ -298,8 +303,8 @@ class StateStore:
                     event.summary,
                     event.actor,
                     int(event.actionable),
-                    status,
-                    delivery_status,
+                    next_status,
+                    next_delivery_status,
                     binding_id,
                     confidence,
                     json.dumps(list(evidence)),
@@ -459,6 +464,38 @@ class StateStore:
             rows = conn.execute(query).fetchall()
         return [_notification_from_row(row) for row in rows]
 
+    def get_notification_by_id(self, notification_id: str) -> NotificationItem:
+        with self.connect() as conn:
+            row = conn.execute("select * from notifications where notification_id = ?", (notification_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"notification not found: {notification_id}")
+        return _notification_from_row(row)
+
+    def update_notification_status(
+        self,
+        notification_id: str,
+        status: str,
+        error: Optional[str] = None,
+    ) -> NotificationItem:
+        current = self.get_notification_by_id(notification_id)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update notifications set
+                  status = ?,
+                  error = ?,
+                  updated_at = ?
+                where notification_id = ?
+                """,
+                (
+                    status,
+                    current.error if error is None else error,
+                    utc_now(),
+                    notification_id,
+                ),
+            )
+        return self.get_notification_by_id(notification_id)
+
 
 def _binding_from_row(row: sqlite3.Row) -> Binding:
     return Binding(
@@ -501,11 +538,25 @@ def _event_from_row(row: sqlite3.Row) -> InboxItem:
         binding_id=row["binding_id"],
         confidence=row["confidence"],
         evidence=json.loads(row["evidence_json"] or "[]"),
+        payload=loads_dict(row["payload_json"] or "{}"),
         recovery_command=row["recovery_command"],
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _should_preserve_delivery_state(existing: InboxItem) -> bool:
+    user_decision_states = {
+        "busy_needs_decision",
+        "delivered",
+        "dropped",
+        "failed",
+        "notify_only",
+        "queued",
+    }
+    final_statuses = {"delivered", "dismissed", "dropped", "queued"}
+    return existing.status in final_statuses or existing.delivery_status in user_decision_states
 
 
 def _queue_from_row(row: sqlite3.Row) -> QueueItem:

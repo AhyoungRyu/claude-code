@@ -17,7 +17,7 @@ from .workflow import route_event
 GH_PR_FIELDS = (
     "number,url,title,author,body,headRefName,updatedAt,isDraft,reviewDecision,"
     "mergeStateStatus,statusCheckRollup,latestReviews,comments,reviewRequests"
-    ",closingIssuesReferences"
+    ",closingIssuesReferences,commits"
 )
 
 ISSUE_REF_RE = re.compile(r"(?:^|\s)(?:fixes|closes|resolves|refs)?\s*#(?P<number>\d+)\b", re.IGNORECASE)
@@ -59,8 +59,14 @@ def fetch_prs(repo: str) -> List[dict]:
     for pr in prs:
         pr.setdefault("owner", owner)
         pr.setdefault("repo", name)
-    enrich_linked_issue_comments(prs, repo)
+    enrich_pull_request_metadata(prs, repo)
     return prs
+
+
+def enrich_pull_request_metadata(prs: List[dict], repo: str) -> None:
+    for pr in prs:
+        _derive_last_pushed_at(pr)
+    enrich_linked_issue_comments(prs, repo)
 
 
 def enrich_linked_issue_comments(prs: List[dict], repo: str) -> None:
@@ -74,6 +80,18 @@ def enrich_linked_issue_comments(prs: List[dict], repo: str) -> None:
             issue["comments"] = fetch_issue_comments(repo, int(number))
         if linked:
             pr["linkedIssues"] = linked
+
+
+def _derive_last_pushed_at(pr: dict) -> None:
+    if pr.get("lastPushedAt"):
+        return
+    commit_dates = []
+    for commit in _items(pr.get("commits")):
+        date = commit.get("committedDate") or commit.get("authoredDate")
+        if date:
+            commit_dates.append(str(date))
+    if commit_dates:
+        pr["lastPushedAt"] = sorted(commit_dates)[-1]
 
 
 def fetch_issue_comments(repo: str, issue_number: int) -> List[dict]:
@@ -156,6 +174,7 @@ def poll_once(
     include_drafts: bool = False,
     notification_mode: str = "none",
     notifier: Optional[object] = None,
+    notification_host: Optional[str] = None,
 ) -> List[InboxItem]:
     if fixture:
         prs = load_fixture(fixture)
@@ -171,7 +190,7 @@ def poll_once(
             continue
         for event in classify_pr(pr, current_user_login):
             routed.append(route_event(store, event, session_list))
-    notify_events(store, routed, mode=notification_mode, notifier=notifier)
+    notify_events(store, routed, mode=notification_mode, notifier=notifier, host=notification_host)
     return routed
 
 
@@ -184,6 +203,7 @@ def daemon_loop(
     interval_seconds: int,
     include_drafts: bool = False,
     notification_mode: str = "none",
+    notification_host: Optional[str] = None,
 ) -> None:
     while True:
         poll_once(
@@ -194,5 +214,6 @@ def daemon_loop(
             sessions=sessions,
             include_drafts=include_drafts,
             notification_mode=notification_mode,
+            notification_host=notification_host,
         )
         time.sleep(interval_seconds)

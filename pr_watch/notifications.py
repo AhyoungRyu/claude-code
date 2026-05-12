@@ -9,7 +9,8 @@ from .models import InboxItem, NotificationResult
 from .state import StateStore
 
 
-VALID_NOTIFICATION_MODES = {"none", "desktop", "browser", "both"}
+VALID_NOTIFICATION_MODES = {"none", "desktop", "in_app", "both", "auto", "browser"}
+APP_HOSTS = {"conductor", "codex_app", "mcp"}
 
 
 @dataclass(frozen=True)
@@ -49,8 +50,12 @@ def notify_events(
     mode: str = "none",
     notifier: Optional[object] = None,
     force: bool = False,
+    host: Optional[str] = None,
 ) -> List[NotificationResult]:
-    return [notify_event(store, event.event_id, mode=mode, notifier=notifier, force=force) for event in events]
+    return [
+        notify_event(store, event.event_id, mode=mode, notifier=notifier, force=force, host=host)
+        for event in events
+    ]
 
 
 def notify_event(
@@ -59,8 +64,9 @@ def notify_event(
     mode: str = "desktop",
     notifier: Optional[object] = None,
     force: bool = False,
+    host: Optional[str] = None,
 ) -> NotificationResult:
-    normalized = normalize_notification_mode(mode)
+    normalized = resolve_notification_mode(mode, host=host)
     if normalized == "none":
         return NotificationResult("skipped", event_id, message="notification mode is none")
 
@@ -75,7 +81,7 @@ def notify_event(
         if existing and not force:
             skipped.append(channel)
             continue
-        if channel == "browser":
+        if channel == "in_app":
             store.upsert_notification(
                 event_id=event_id,
                 channel=channel,
@@ -119,17 +125,37 @@ def render_notification(event: InboxItem) -> tuple[str, str]:
 
 def normalize_notification_mode(mode: str) -> str:
     normalized = (mode or "none").strip().lower()
+    if normalized == "browser":
+        return "in_app"
     if normalized not in VALID_NOTIFICATION_MODES:
         raise ValueError(f"notification mode must be one of: {', '.join(sorted(VALID_NOTIFICATION_MODES))}")
     return normalized
 
 
+def resolve_notification_mode(
+    mode: str,
+    host: Optional[str] = None,
+    platform_name: Optional[str] = None,
+) -> str:
+    normalized = normalize_notification_mode(mode)
+    if normalized != "auto":
+        return normalized
+    if (host or "").strip().lower() in APP_HOSTS:
+        return "in_app"
+    system = platform_name or platform.system()
+    if system == "Darwin":
+        return "desktop"
+    return "in_app"
+
+
 def channels_for_mode(mode: str) -> List[str]:
     normalized = normalize_notification_mode(mode)
     if normalized == "both":
-        return ["desktop", "browser"]
+        return ["desktop", "in_app"]
     if normalized == "none":
         return []
+    if normalized == "auto":
+        normalized = resolve_notification_mode(normalized)
     return [normalized]
 
 

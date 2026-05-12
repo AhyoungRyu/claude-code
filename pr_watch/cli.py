@@ -16,6 +16,14 @@ from .state import StateStore
 from .workflow import create_explicit_binding
 
 
+INIT_PROFILE_NOTIFICATION_MODES = {
+    "terminal": "desktop",
+    "conductor": "in_app",
+    "app": "in_app",
+    "auto": "auto",
+}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -117,6 +125,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             path = set_config_value(args.key, args.value, args.state_dir)
             print(f"updated {path}")
             return 0
+        if args.command == "init":
+            mode = INIT_PROFILE_NOTIFICATION_MODES[args.profile]
+            path = set_config_value("notification_mode", mode, args.state_dir)
+            print(f"initialized {path}")
+            print(f"profile: {args.profile}")
+            print(f"notification_mode: {mode}")
+            return 0
         if args.command == "doctor":
             return doctor(args.state_dir)
         if args.command == "mcp":
@@ -152,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument(
         "--notification-mode",
         choices=sorted(VALID_NOTIFICATION_MODES),
-        help="send independent notifications for recorded events; default is config notification_mode=none",
+        help="send independent notifications for recorded events; default is config notification_mode=auto",
     )
 
     inbox = subparsers.add_parser("inbox", help="show pending PR events")
@@ -183,8 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
     notify.add_argument("--mode", choices=sorted(VALID_NOTIFICATION_MODES))
     notify.add_argument("--force", action="store_true", help="send again even if this event/channel was notified")
 
-    notifications = subparsers.add_parser("notifications", help="show browser notification outbox and failures")
+    notifications = subparsers.add_parser("notifications", help="show in-app notification inbox and failures")
     notifications.add_argument("--all", action="store_true", help="include sent desktop notifications")
+
+    init = subparsers.add_parser("init", help="initialize pr-watch defaults for a host profile")
+    init.add_argument("--profile", choices=sorted(INIT_PROFILE_NOTIFICATION_MODES), default="auto")
 
     config = subparsers.add_parser("config", help="configure pr-watch")
     config_sub = config.add_subparsers(dest="config_command")
