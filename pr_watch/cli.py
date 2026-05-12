@@ -10,6 +10,13 @@ from typing import List, Optional
 from .config import config_bool, load_config, set_config_value, state_db_path
 from .delivery import approve_event
 from .github import current_user, daemon_loop, poll_once
+from .host_integration import (
+    build_codex_mcp_add_command,
+    build_codex_mcp_get_command,
+    build_mcp_launch_config,
+    install_mcp_hosts,
+    resolve_codex_hosts,
+)
 from .notifications import VALID_NOTIFICATION_MODES, notify_event
 from .sessions import discover_sessions
 from .state import StateStore
@@ -132,6 +139,46 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"profile: {args.profile}")
             print(f"notification_mode: {mode}")
             return 0
+        if args.command == "install-mcp":
+            state_dir = str(state_db_path(args.state_dir).parent)
+            if args.dry_run:
+                launch = build_mcp_launch_config(
+                    python_executable=args.python_executable,
+                    state_dir=state_dir,
+                )
+                hosts = resolve_codex_hosts(
+                    args.target,
+                    codex_binary=args.codex_bin,
+                    conductor_codex_binary=args.conductor_codex_bin,
+                )
+                if not hosts:
+                    print("No Codex host binaries found.")
+                    return 1
+                for host in hosts:
+                    print(f"{host.host}: {host.binary}")
+                    print("  check:", " ".join(build_codex_mcp_get_command(host.binary)))
+                    print("  add:", " ".join(build_codex_mcp_add_command(host.binary, launch)))
+                return 0
+            results = install_mcp_hosts(
+                target=args.target,
+                python_executable=args.python_executable,
+                state_dir=state_dir,
+                codex_binary=args.codex_bin,
+                conductor_codex_binary=args.conductor_codex_bin,
+                replace=not args.no_replace,
+            )
+            if not results:
+                print("No Codex host binaries found.")
+                return 1
+            failed = False
+            for result in results:
+                print(f"{result.host}: {result.status}")
+                if result.binary:
+                    print(f"  binary: {result.binary}")
+                if result.message:
+                    print(f"  {result.message}")
+                failed = failed or result.status == "failed"
+            return 1 if failed else 0
         if args.command == "doctor":
             return doctor(args.state_dir)
         if args.command == "mcp":
@@ -203,6 +250,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = subparsers.add_parser("init", help="initialize pr-watch defaults for a host profile")
     init.add_argument("--profile", choices=sorted(INIT_PROFILE_NOTIFICATION_MODES), default="auto")
+
+    install_mcp = subparsers.add_parser(
+        "install-mcp",
+        help="register the PR Watch MCP server with Codex App and/or Conductor",
+    )
+    install_mcp.add_argument("--target", choices=["codex-app", "codex", "app", "conductor", "all"], default="all")
+    install_mcp.add_argument("--python", dest="python_executable", default=sys.executable)
+    install_mcp.add_argument("--codex-bin", help="Codex App/CLI binary; defaults to PATH codex or ~/bin/codex")
+    install_mcp.add_argument(
+        "--conductor-codex-bin",
+        help="Conductor bundled codex binary; defaults to ~/Library/Application Support/com.conductor.app/bin/codex",
+    )
+    install_mcp.add_argument("--no-replace", action="store_true", help="do not replace an existing pr-watch MCP entry")
+    install_mcp.add_argument("--dry-run", action="store_true", help="print the commands without changing Codex config")
 
     config = subparsers.add_parser("config", help="configure pr-watch")
     config_sub = config.add_subparsers(dest="config_command")

@@ -1,10 +1,36 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable, List, Optional, Tuple
 
 from .models import Binding, ClassifiedEvent, InboxItem, PullRequestRef, SessionInfo
 from .state import StateStore
 from .util import parse_pr_url, stable_id
+
+
+CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+@dataclass(frozen=True)
+class SessionCandidate:
+    confidence: str
+    session: SessionInfo
+    evidence: List[str]
+    rank: int
+    active_rank: int
+    evidence_score: int
+    activity_ts: float
+
+    @property
+    def decisive_key(self) -> Tuple[int, int, int, float]:
+        return (self.rank, self.active_rank, self.evidence_score, self.activity_ts)
+
+
+@dataclass(frozen=True)
+class SessionCandidateSelection:
+    candidate: Optional[SessionCandidate]
+    ambiguous_candidates: List[SessionCandidate]
 
 
 def create_explicit_binding(
@@ -50,9 +76,19 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
             evidence=evidence,
         )
 
-    score = best_session_candidate(event.pr, sessions)
-    if score is None or score[0] == "low":
-        evidence = score[2] if score else ["no session candidate with enough evidence"]
+    selection = select_session_candidate(event.pr, sessions)
+    if selection.ambiguous_candidates:
+        return store.upsert_event(
+            event,
+            status="pending",
+            delivery_status="ambiguous_session_candidates",
+            binding_id=None,
+            confidence=selection.ambiguous_candidates[0].confidence,
+            evidence=ambiguous_candidate_evidence(selection.ambiguous_candidates),
+        )
+
+    if selection.candidate is None or selection.candidate.confidence == "low":
+        evidence = selection.candidate.evidence if selection.candidate else ["no session candidate with enough evidence"]
         return store.upsert_event(
             event,
             status="pending",
@@ -62,7 +98,9 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
             evidence=evidence,
         )
 
-    confidence, session, evidence = score
+    confidence = selection.candidate.confidence
+    session = selection.candidate.session
+    evidence = selection.candidate.evidence
     binding_id = stable_id("binding", event.pr.repo_full_name, event.pr.number, event.role, session.agent, session.session_id)
     binding = store.create_binding(
         repo_owner=event.pr.owner,
@@ -94,17 +132,90 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
 def best_session_candidate(
     pr: PullRequestRef, sessions: Iterable[SessionInfo]
 ) -> Optional[Tuple[str, SessionInfo, List[str]]]:
-    ranked: List[Tuple[int, str, SessionInfo, List[str]]] = []
+    selection = select_session_candidate(pr, sessions)
+    if selection.candidate is None or selection.ambiguous_candidates:
+        return None
+    candidate = selection.candidate
+    return candidate.confidence, candidate.session, candidate.evidence
+
+
+def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]) -> SessionCandidateSelection:
+    ranked: List[SessionCandidate] = []
     for session in sessions:
         confidence, evidence = score_session(pr, session)
-        rank = {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+        rank = CONFIDENCE_RANK.get(confidence, 0)
         if rank:
-            ranked.append((rank, confidence, session, evidence))
+            ranked.append(
+                SessionCandidate(
+                    confidence=confidence,
+                    session=session,
+                    evidence=evidence,
+                    rank=rank,
+                    active_rank=1 if is_active_or_focused_session(session) else 0,
+                    evidence_score=len(evidence),
+                    activity_ts=session_activity_ts(session),
+                )
+            )
     if not ranked:
-        return None
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    _, confidence, session, evidence = ranked[0]
-    return confidence, session, evidence
+        return SessionCandidateSelection(candidate=None, ambiguous_candidates=[])
+
+    ranked.sort(
+        key=lambda candidate: (
+            candidate.rank,
+            candidate.active_rank,
+            candidate.evidence_score,
+            candidate.activity_ts,
+            candidate.session.agent,
+            candidate.session.session_id,
+        ),
+        reverse=True,
+    )
+    best = ranked[0]
+    top_ties = [candidate for candidate in ranked if candidate.decisive_key == best.decisive_key]
+    if best.rank >= CONFIDENCE_RANK["medium"] and len(top_ties) > 1:
+        return SessionCandidateSelection(candidate=None, ambiguous_candidates=top_ties)
+
+    annotated = SessionCandidate(
+        confidence=best.confidence,
+        session=best.session,
+        evidence=annotated_selection_evidence(best, ranked),
+        rank=best.rank,
+        active_rank=best.active_rank,
+        evidence_score=best.evidence_score,
+        activity_ts=best.activity_ts,
+    )
+    return SessionCandidateSelection(candidate=annotated, ambiguous_candidates=[])
+
+
+def annotated_selection_evidence(best: SessionCandidate, ranked: List[SessionCandidate]) -> List[str]:
+    evidence = list(best.evidence)
+    peers = [candidate for candidate in ranked if candidate is not best and candidate.rank == best.rank]
+    if not peers:
+        return evidence
+    if best.active_rank and any(peer.active_rank < best.active_rank for peer in peers):
+        evidence.append("preferred active or focused session over other matching candidates")
+    if best.activity_ts and all(best.activity_ts > peer.activity_ts for peer in peers):
+        evidence.append("preferred newest matching session by last_activity_at")
+    if all(best.evidence_score > peer.evidence_score for peer in peers):
+        evidence.append("preferred strongest matching session evidence")
+    return evidence
+
+
+def ambiguous_candidate_evidence(candidates: List[SessionCandidate]) -> List[str]:
+    evidence = ["multiple equally likely session candidates; choose one explicitly before resuming"]
+    for candidate in candidates[:5]:
+        session = candidate.session
+        label = f"{session.agent}:{session.session_id}"
+        details = []
+        if session.cwd:
+            details.append(f"cwd={session.cwd}")
+        if session.branch:
+            details.append(f"branch={session.branch}")
+        if session.last_activity_at:
+            details.append(f"last_activity_at={session.last_activity_at}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        evidence.append(f"candidate {label}{suffix}")
+    return evidence
 
 
 def score_session(pr: PullRequestRef, session: SessionInfo) -> Tuple[str, List[str]]:
@@ -134,6 +245,25 @@ def score_session(pr: PullRequestRef, session: SessionInfo) -> Tuple[str, List[s
     if repo_match:
         return "low", evidence
     return "none", []
+
+
+def is_active_or_focused_session(session: SessionInfo) -> bool:
+    marker = " ".join([str(session.host or ""), session.title]).lower()
+    return any(token in marker for token in ("active", "focused", "foreground", "current"))
+
+
+def session_activity_ts(session: SessionInfo) -> float:
+    value = (session.last_activity_at or "").strip()
+    if not value:
+        return 0.0
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def parse_pr_reference(value: str, repo: Optional[str] = None) -> PullRequestRef:

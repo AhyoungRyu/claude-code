@@ -105,7 +105,7 @@ def _discover_codex_rollouts(codex_root: Path) -> List[SessionInfo]:
                 branch=_extract_branch(text),
                 text=text,
                 host="codex_cli",
-                last_activity_at=str(meta.get("timestamp") or ""),
+                last_activity_at=_latest_record_timestamp(records) or str(meta.get("timestamp") or ""),
             )
         )
     return sessions
@@ -147,6 +147,21 @@ def _codex_record_text(record: Dict[str, Any]) -> str:
                     parts.append(item["text"])
             if parts:
                 return "\n".join(parts)
+    return ""
+
+
+def _latest_record_timestamp(records: List[Dict[str, Any]]) -> str:
+    for record in reversed(records):
+        for key in ("timestamp", "updated_at", "created_at"):
+            value = record.get(key)
+            if value:
+                return str(value)
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            for key in ("timestamp", "updated_at", "created_at"):
+                value = payload.get(key)
+                if value:
+                    return str(value)
     return ""
 
 

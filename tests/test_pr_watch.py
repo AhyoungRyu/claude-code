@@ -9,6 +9,12 @@ from pr_watch.cli import main
 from pr_watch.config import load_config
 from pr_watch.delivery import CommandResult, RecordingRunner, approve_event
 from pr_watch.github import GH_PR_FIELDS, enrich_pull_request_metadata, poll_once
+from pr_watch.host_integration import (
+    RecordingHostCommandRunner,
+    build_codex_mcp_add_command,
+    build_mcp_launch_config,
+    install_mcp_hosts,
+)
 from pr_watch.models import SessionInfo
 from pr_watch.notifications import resolve_notification_mode
 from pr_watch.sessions import discover_sessions
@@ -446,6 +452,152 @@ class PrWatchTests(unittest.TestCase):
 
             self.assertEqual("queued", result.action)
             self.assertTrue(store.get_binding(inbox_item.binding_id).confirmed)
+
+    def test_first_inferred_binding_prefers_most_recent_matching_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            older_session = SessionInfo(
+                agent="codex",
+                session_id="codex-older",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T09:30:00Z",
+            )
+            newer_session = SessionInfo(
+                agent="codex",
+                session_id="codex-newer",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T10:30:00Z",
+            )
+
+            inbox_item = route_event(store, event, sessions=[older_session, newer_session])
+            binding = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("codex-newer", binding.session_id)
+            self.assertIn("preferred newest matching session", " ".join(inbox_item.evidence))
+
+    def test_active_session_beats_newer_inactive_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            active_session = SessionInfo(
+                agent="codex",
+                session_id="codex-active",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                host="codex_app:active",
+                last_activity_at="2026-05-11T09:30:00Z",
+            )
+            inactive_session = SessionInfo(
+                agent="codex",
+                session_id="codex-newer",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T10:30:00Z",
+            )
+
+            inbox_item = route_event(store, event, sessions=[inactive_session, active_session])
+            binding = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("codex-active", binding.session_id)
+            self.assertIn("active or focused session", " ".join(inbox_item.evidence))
+
+    def test_equally_likely_sessions_stay_in_inbox_until_user_binds_one(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            first_session = SessionInfo(
+                agent="codex",
+                session_id="codex-first",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T10:30:00Z",
+            )
+            second_session = SessionInfo(
+                agent="codex",
+                session_id="codex-second",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T10:30:00Z",
+            )
+
+            inbox_item = route_event(store, event, sessions=[first_session, second_session])
+
+            self.assertEqual("pending", inbox_item.status)
+            self.assertEqual("ambiguous_session_candidates", inbox_item.delivery_status)
+            self.assertIsNone(inbox_item.binding_id)
+            self.assertIn("codex-first", " ".join(inbox_item.evidence))
+            self.assertIn("codex-second", " ".join(inbox_item.evidence))
 
     def test_desktop_notification_does_not_resume_or_queue(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -962,6 +1114,120 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(0, app_code)
             self.assertEqual("in_app", load_config(tmpdir)["notification_mode"])
 
+    def test_mcp_launch_config_uses_python_module_entrypoint(self):
+        launch = build_mcp_launch_config(
+            python_executable="/opt/pr-watch/bin/python",
+            state_dir="/Users/irene.ryu/.pr-watch",
+        )
+
+        self.assertEqual("/opt/pr-watch/bin/python", launch.command)
+        self.assertEqual(["-m", "pr_watch", "--state-dir", "/Users/irene.ryu/.pr-watch", "mcp"], launch.args)
+
+    def test_codex_mcp_add_command_wraps_pr_watch_launch_config(self):
+        launch = build_mcp_launch_config(python_executable="/opt/pr-watch/bin/python")
+
+        command = build_codex_mcp_add_command("/Users/irene.ryu/bin/codex", launch)
+
+        self.assertEqual(
+            [
+                "/Users/irene.ryu/bin/codex",
+                "mcp",
+                "add",
+                "pr-watch",
+                "--",
+                "/opt/pr-watch/bin/python",
+                "-m",
+                "pr_watch",
+                "mcp",
+            ],
+            command,
+        )
+
+    def test_install_mcp_hosts_registers_codex_and_conductor_binaries(self):
+        runner = RecordingHostCommandRunner()
+        results = install_mcp_hosts(
+            target="all",
+            python_executable="/opt/pr-watch/bin/python",
+            state_dir="/Users/irene.ryu/.pr-watch",
+            codex_binary="/Users/irene.ryu/bin/codex",
+            conductor_codex_binary="/Applications/Conductor.app/Contents/Resources/bin/codex",
+            runner=runner,
+        )
+
+        self.assertEqual(["codex-app", "conductor"], [result.host for result in results])
+        self.assertEqual(["installed", "installed"], [result.status for result in results])
+        self.assertEqual(
+            [
+                [
+                    "/Users/irene.ryu/bin/codex",
+                    "mcp",
+                    "get",
+                    "pr-watch",
+                ],
+                [
+                    "/Users/irene.ryu/bin/codex",
+                    "mcp",
+                    "add",
+                    "pr-watch",
+                    "--",
+                    "/opt/pr-watch/bin/python",
+                    "-m",
+                    "pr_watch",
+                    "--state-dir",
+                    "/Users/irene.ryu/.pr-watch",
+                    "mcp",
+                ],
+                [
+                    "/Applications/Conductor.app/Contents/Resources/bin/codex",
+                    "mcp",
+                    "get",
+                    "pr-watch",
+                ],
+                [
+                    "/Applications/Conductor.app/Contents/Resources/bin/codex",
+                    "mcp",
+                    "add",
+                    "pr-watch",
+                    "--",
+                    "/opt/pr-watch/bin/python",
+                    "-m",
+                    "pr_watch",
+                    "--state-dir",
+                    "/Users/irene.ryu/.pr-watch",
+                    "mcp",
+                ],
+            ],
+            runner.commands,
+        )
+
+    def test_cli_install_mcp_dry_run_prints_codex_and_conductor_commands(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = StringIO()
+
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--state-dir",
+                        tmpdir,
+                        "install-mcp",
+                        "--target",
+                        "all",
+                        "--python",
+                        "/opt/pr-watch/bin/python",
+                        "--codex-bin",
+                        "/Users/irene.ryu/bin/codex",
+                        "--conductor-codex-bin",
+                        "/Applications/Conductor.app/Contents/Resources/bin/codex",
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(0, code)
+            text = output.getvalue()
+            self.assertIn("codex-app", text)
+            self.assertIn("conductor", text)
+            self.assertIn("/opt/pr-watch/bin/python -m pr_watch --state-dir", text)
+
     def test_session_discovery_reads_claude_and_codex_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
@@ -998,7 +1264,8 @@ class PrWatchTests(unittest.TestCase):
                 '"cwd":"/repo/claude-code","timestamp":"2026-05-12T04:14:27Z",'
                 '"source":"exec"}}\n'
                 '{"type":"event_msg","payload":{"type":"user_message","message":'
-                '"Test https://github.com/AhyoungRyu/claude-code/pull/5"}}\n',
+                '"Test https://github.com/AhyoungRyu/claude-code/pull/5"},'
+                '"timestamp":"2026-05-12T04:30:00Z"}\n',
                 encoding="utf-8",
             )
 
@@ -1007,6 +1274,7 @@ class PrWatchTests(unittest.TestCase):
 
             self.assertEqual("codex", session.agent)
             self.assertEqual("/repo/claude-code", session.cwd)
+            self.assertEqual("2026-05-12T04:30:00Z", session.last_activity_at)
             self.assertIn("AhyoungRyu/claude-code/pull/5", session.text)
 
 
