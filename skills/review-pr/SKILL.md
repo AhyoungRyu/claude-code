@@ -126,7 +126,33 @@ LATEST_HEAD_SHA=$(gh pr view $PR_NUMBER --json headRefOid -q .headRefOid)
 - **Surface-neighborhood rule**: any path:line within ±20 lines of an existing bot comment is the *same surface*. New findings on the same surface require explicit justification — see Step 3 author-intent rule.
 - The full exclusion list + `$PR_BODY` are passed to **every** review agent in Step 3 and to the verifier in Step 4b.
 
-### 1d — External CLI availability checks
+### 1d — Fetch linked external spec/design docs (CRITICAL)
+
+**The single biggest cause of false-positive findings is reviewing a PR without reading its linked spec.**
+Many "issues" surfaced by reviewers (wire format, response shape, scope semantics, naming) are settled by the spec the author already linked in the PR body. If you skip this step, expect ~5–10 false positives per non-trivial PR.
+
+Extract all external links from `$PR_BODY` (captured in 1c) and fetch them BEFORE Step 2. Apply to:
+
+- **Confluence / Atlassian wiki pages** — load via `mcp__claude_ai_Atlassian__getConfluencePage` (pass `pageId` and `cloudId`). Tiny links (`/wiki/x/<id>`) work too.
+- **Jira tickets** — load via `mcp__claude_ai_Atlassian__getJiraIssue` for acceptance criteria and linked artifacts.
+- **Google Docs / Notion / public wikis** — use `WebFetch` to capture the text.
+- **GitHub issues / discussions on other repos** — use `gh issue view <url>` or `WebFetch`.
+
+If MCP tools for Atlassian are not loaded, call `ToolSearch` with the tool name first (e.g., `select:mcp__claude_ai_Atlassian__getConfluencePage`).
+
+For each fetched spec, extract:
+- **Wire contracts** — exact request body field names, query params vs body, response shape, status codes (e.g., `200 OK + {}` vs `204 No Content`)
+- **Semantic invariants** — what "optional" means, what default behavior is, what fields are filters vs attribution
+- **Cross-endpoint relationships** — how multiple endpoints' responses share types
+- **Workspace/feature-flag interactions** — admin policies that change endpoint behavior
+
+Save the fetched spec content to `$PLAYBOOK_DIR/specs/` (one file per link, named after the page title) and pass the **distilled facts** into every Step 3 reviewer prompt under a `## SPEC FACTS` section.
+
+> Findings that contradict the spec are auto-dropped in Step 4a. Reviewers must check their findings against the spec facts before reporting.
+
+**Skip rule:** If no external links are present in the PR body, or all links are internal-tools-only (CI dashboards, Slack threads), proceed without this step. Do NOT block on a single link that returns 403/404 — record the failure in `$PLAYBOOK_DIR/specs/_failures.md` and continue with the rest.
+
+### 1e — External CLI availability checks
 
 **Codex CLI:**
 ```bash
@@ -194,6 +220,7 @@ Use the Agent tool with `run_in_background: true` to launch all applicable agent
 
 Each agent receives:
 - PR title and **`$PR_BODY` verbatim** (from Step 1c — full text, not a summary). Reviewers MUST read the body before flagging anything as "scope leak", "undocumented", "unexpected change", "unrelated refactor", etc.
+- **`## SPEC FACTS` block** (from Step 1d) — distilled wire/semantic facts extracted from external spec/design docs linked in the PR body. Reviewers MUST check every potential finding against these facts; findings that contradict the spec are auto-dropped in Step 4a.
 - `$FULL_DIFF` (the `origin/$BASE_REF...origin/$HEAD_REF` diff from Step 1b)
 - Instruction: **focus only on changed files**, not the entire codebase
 - **Exclusion list from Step 1c** with surface-neighborhood rule: list of `path:line` + summary + status (Open/Addressed) of bot comments, plus any "bot signed off on this head commit" signal. The exclusion covers the issue itself **and the same surface ±20 lines**.
@@ -373,21 +400,26 @@ After all tracks complete, run **three sub-phases**: merge → verifier round �
 
 1. **Merge findings**: Collect all issues from Claude Code agents (Track A), Codex CLI (Track B), and Gemini CLI (Track C).
 
-2. **Deduplicate against existing PR comments**: Before classifying findings, compare each issue against the exclusion list (Codex bot comments + reviews from Step 1c) using the **surface-neighborhood rule** (±20 lines). If an issue is on the same surface as an existing bot comment:
+2. **Spec-contradiction drop (uses Step 1d facts)**: For every finding, check it against the `SPEC FACTS` extracted in Step 1d. A finding is **spec-contradicted** when the spec explicitly settles the question (wire format, response status, scope/filter semantics, default behavior, etc.) and the code matches the spec. Move such findings to a **`## Spec-Resolved (dropped)`** section in the final report with one-line citation of the spec passage. Do NOT include them in severity buckets. Examples of patterns that get dropped here:
+   - "API returns 204 No Content, SDK can't parse" → spec says `200 + {}` → drop
+   - "DELETE should send body, not query string" → spec says query string → drop
+   - "Parameter X scopes the operation" → spec says X is audit-only → drop
+
+3. **Deduplicate against existing PR comments**: Before classifying findings, compare each issue against the exclusion list (Codex bot comments + reviews from Step 1c) using the **surface-neighborhood rule** (±20 lines). If an issue is on the same surface as an existing bot comment:
    - If substantially the same → **drop** and record under "Already Flagged by Codex Bot"
    - If "different angle" without a concrete materially-distinct defect → **drop**
    - Only retain when the reviewer's one-line justification (from Step 3 Bot-overlap Filter) shows a defect the bot truly missed
 
-3. **Apply auto-down-rank**: any finding without an author-intent justification line drops one severity tier (Critical→High, High→Medium, Medium→Low, Low→drop).
+4. **Apply auto-down-rank**: any finding without an author-intent justification line drops one severity tier (Critical→High, High→Medium, Medium→Low, Low→drop).
 
-4. **Classify each finding by agreement level:**
+5. **Classify each finding by agreement level:**
    - **Strong consensus** (2+ sources agree): High confidence — include with boosted credibility. If all 3 sources agree, mark as **unanimous**.
    - **Claude-only**: Only Claude agents found this. Assess whether the other models likely missed it (complex logic requiring deep context) or whether it might be a false positive.
    - **Codex-only**: Only Codex found this. Verify by reading the relevant code.
    - **Gemini-only**: Only Gemini found this. Gemini's large context may catch cross-file issues others miss, but verify specificity — Gemini can be broad.
    - **Contradicted**: Two or more sources disagree on the same code section. **Investigate the actual code** to determine which assessment is correct. State which reviewer(s) were right and why.
 
-5. **Accuracy judgment**: For each non-corroborated finding, add a brief accuracy assessment:
+6. **Accuracy judgment**: For each non-corroborated finding, add a brief accuracy assessment:
    - `[Verified]` — manually confirmed by reading the code
    - `[Likely valid]` — consistent with codebase patterns but not manually verified
    - `[Questionable]` — may be a false positive; include the counter-argument
@@ -498,6 +530,10 @@ Base: [baseRef] <- Head: [headRef] | +[additions] / -[deletions] lines
 
 ## 🔵 Design Choices (informational)
 - [Patterns that look unusual but appear intentional — describe the tradeoff rather than prescribing a change]
+
+## ⚪️ Spec-Resolved (dropped in Step 4a)
+- `file.ts:N` — [original finding] — **Source:** [reviewer] — **Spec citation:** [one-line quote from $PLAYBOOK_DIR/specs/* that settles the question]
+> Findings auto-dropped because the linked spec explicitly settles them (wire format, response status, scope semantics, etc.). Kept here for transparency.
 
 ## 🟣 Verifier-dropped Findings (decision trail)
 - `file.ts:N` — [original finding] — **Verifier reason:** [why dropped] — **Original source:** [reviewer]
