@@ -7,7 +7,7 @@ from pathlib import Path
 from pr_watch.classifier import classify_pr
 from pr_watch.cli import main
 from pr_watch.delivery import CommandResult, RecordingRunner, approve_event
-from pr_watch.github import GH_PR_FIELDS
+from pr_watch.github import GH_PR_FIELDS, poll_once
 from pr_watch.models import SessionInfo
 from pr_watch.sessions import discover_sessions
 from pr_watch.state import StateStore
@@ -24,6 +24,98 @@ def make_store(tmpdir):
 class PrWatchTests(unittest.TestCase):
     def test_github_polling_requests_pr_comments(self):
         self.assertIn("comments", GH_PR_FIELDS.split(","))
+
+    def test_github_polling_requests_draft_status(self):
+        self.assertIn("isDraft", GH_PR_FIELDS.split(","))
+
+    def test_poll_once_skips_draft_prs_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "isDraft": true,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                      {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z"
+                      }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+
+            items = poll_once(make_store(tmpdir), "irene", fixture=str(fixture), sessions=[])
+
+            self.assertEqual([], items)
+
+    def test_poll_once_can_include_draft_prs_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "isDraft": true,
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                      {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z"
+                      }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+
+            items = poll_once(
+                make_store(tmpdir),
+                "irene",
+                fixture=str(fixture),
+                sessions=[],
+                include_drafts=True,
+            )
+
+            self.assertEqual(1, len(items))
+            self.assertEqual("author_push_after_review", items[0].event_type)
+
+    def test_mcp_handlers_share_watcher_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import bind_pr, list_inbox
+
+            bind_result = bind_pr(
+                pr=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                state_dir=tmpdir,
+            )
+            inbox_result = list_inbox(state_dir=tmpdir)
+
+            self.assertEqual("codex-abc", bind_result["binding"]["session_id"])
+            self.assertEqual([], inbox_result["events"])
 
     def test_author_feedback_events_are_actionable_and_deduped(self):
         pr = {

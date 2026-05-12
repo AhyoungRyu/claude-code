@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from .config import load_config, set_config_value, state_db_path
+from .config import config_bool, load_config, set_config_value, state_db_path
 from .delivery import approve_event
 from .github import current_user, daemon_loop, poll_once
 from .sessions import discover_sessions
@@ -41,14 +41,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "daemon":
             store = StateStore(state_db_path(args.state_dir))
             user = args.user or current_user()
+            config = load_config(args.state_dir)
+            include_drafts = (
+                args.include_drafts
+                if args.include_drafts is not None
+                else config_bool(config, "include_drafts", default=False)
+            )
             sessions = discover_sessions()
             if args.once:
-                items = poll_once(store, user, repo=args.repo, fixture=args.fixture, sessions=sessions)
+                items = poll_once(
+                    store,
+                    user,
+                    repo=args.repo,
+                    fixture=args.fixture,
+                    sessions=sessions,
+                    include_drafts=include_drafts,
+                )
                 print(f"recorded {len(items)} actionable event(s)")
                 return 0
-            config = load_config(args.state_dir)
             interval = int(args.interval or config.get("poll_interval_seconds", "120"))
-            daemon_loop(store, user, repo=args.repo, fixture=args.fixture, sessions=sessions, interval_seconds=interval)
+            daemon_loop(
+                store,
+                user,
+                repo=args.repo,
+                fixture=args.fixture,
+                sessions=sessions,
+                interval_seconds=interval,
+                include_drafts=include_drafts,
+            )
             return 0
         if args.command == "inbox":
             store = StateStore(state_db_path(args.state_dir))
@@ -80,6 +100,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.state_dir)
+        if args.command == "mcp":
+            from .mcp_server import run_server
+
+            run_server(args.state_dir)
+            return 0
     except Exception as exc:  # pragma: no cover - exercised by CLI users
         print(f"pr-watch: {exc}", file=sys.stderr)
         return 1
@@ -99,6 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--fixture", help="JSON fixture for local replay/testing")
     daemon.add_argument("--user", help="current GitHub login; defaults to gh api user")
     daemon.add_argument("--interval", type=int, help="poll interval in seconds")
+    daemon.add_argument(
+        "--include-drafts",
+        action="store_true",
+        default=None,
+        help="also watch draft pull requests; default is config include_drafts=false",
+    )
 
     inbox = subparsers.add_parser("inbox", help="show pending PR events")
     inbox.add_argument("--all", action="store_true", help="include delivered and dismissed items")
@@ -131,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     config.set_defaults(command="config")
 
     subparsers.add_parser("doctor", help="check local dependencies and state")
+    subparsers.add_parser("mcp", help="run the PR watcher MCP server over stdio")
     return parser
 
 
@@ -163,6 +195,7 @@ def doctor(state_dir: Optional[str]) -> int:
     config = load_config(state_dir)
     print(f"state: {state_db_path(state_dir)}")
     print(f"busy_policy: {config.get('busy_policy')}")
+    print(f"include_drafts: {config.get('include_drafts')}")
     for executable in ["gh", "claude", "codex"]:
         path = shutil.which(executable)
         print(f"{executable}: {path or 'not found'}")

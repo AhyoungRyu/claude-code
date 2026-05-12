@@ -14,7 +14,7 @@ from .workflow import route_event
 
 
 GH_PR_FIELDS = (
-    "number,url,title,author,body,headRefName,updatedAt,reviewDecision,"
+    "number,url,title,author,body,headRefName,updatedAt,isDraft,reviewDecision,"
     "mergeStateStatus,statusCheckRollup,latestReviews,comments,reviewRequests"
     ",closingIssuesReferences"
 )
@@ -152,6 +152,7 @@ def poll_once(
     repo: Optional[str] = None,
     fixture: Optional[str] = None,
     sessions: Optional[Iterable[SessionInfo]] = None,
+    include_drafts: bool = False,
 ) -> List[InboxItem]:
     if fixture:
         prs = load_fixture(fixture)
@@ -163,6 +164,8 @@ def poll_once(
     session_list = list(sessions or [])
     routed: List[InboxItem] = []
     for pr in prs:
+        if pr.get("isDraft") and not include_drafts:
+            continue
         for event in classify_pr(pr, current_user_login):
             routed.append(route_event(store, event, session_list))
     return routed
@@ -175,7 +178,15 @@ def daemon_loop(
     fixture: Optional[str],
     sessions: Optional[Iterable[SessionInfo]],
     interval_seconds: int,
+    include_drafts: bool = False,
 ) -> None:
     while True:
-        poll_once(store, current_user_login, repo=repo, fixture=fixture, sessions=sessions)
+        poll_once(
+            store,
+            current_user_login,
+            repo=repo,
+            fixture=fixture,
+            sessions=sessions,
+            include_drafts=include_drafts,
+        )
         time.sleep(interval_seconds)

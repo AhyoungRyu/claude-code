@@ -8,6 +8,7 @@ DEFAULT_CONFIG = {
     "poll_interval_seconds": "120",
     "busy_policy": "run_if_idle_queue_if_busy",
     "default_delivery": "confirm_first",
+    "include_drafts": "false",
 }
 
 
@@ -45,3 +46,10 @@ def set_config_value(key: str, value: str, state_dir: Optional[str] = None) -> P
     lines = [f'{name} = "{config[name]}"' for name in sorted(config)]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def config_bool(config: Dict[str, str], key: str, default: bool = False) -> bool:
+    value = config.get(key)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

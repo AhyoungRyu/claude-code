@@ -25,6 +25,7 @@ pr-watch bind https://github.com/owner/name/pull/1049 --role reviewer --agent co
 pr-watch approve <event-id>
 pr-watch queue
 pr-watch config set busy_policy run_if_idle_queue_if_busy
+pr-watch mcp
 ```
 
 For local fixture replay while developing:
@@ -32,6 +33,26 @@ For local fixture replay while developing:
 ```bash
 pr-watch daemon --once --fixture tests/fixtures/prs.json --user <github-login>
 ```
+
+By default, `pr-watch` ignores draft pull requests and only records events for
+PRs that are ready for review. Draft PRs usually do not have meaningful review
+or status transitions, so watching them is opt-in:
+
+```bash
+pr-watch daemon --once --repo owner/name --include-drafts
+pr-watch config set include_drafts true
+```
+
+For MCP clients, run the local stdio server with:
+
+```bash
+pr-watch mcp
+# or
+pr-watch-mcp
+```
+
+The MCP server exposes the same local state and approval flow as the CLI:
+`poll_once`, `list_inbox`, `bind_pr`, `approve`, `list_queue`, and `doctor`.
 
 The MVP deliberately does not depend on Conductor internals or any shared
 webhook service. Low-confidence events stay in the inbox, first inferred

@@ -9,10 +9,11 @@ description = "Local-first PR session watcher for Claude Code and Codex sessions
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Claude Code Skills Maintainers" }]
-dependencies = []
+dependencies = ["mcp>=1.22"]
 
 [project.scripts]
 pr-watch = "pr_watch.cli:main"
+pr-watch-mcp = "pr_watch.mcp_server:run_server"
 
 [tool.setuptools.packages.find]
 include = ["pr_watch*"]
