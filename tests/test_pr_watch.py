@@ -1,5 +1,6 @@
 import os
 import plistlib
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ from pr_watch.host_integration import (
     build_mcp_launch_config,
     install_mcp_hosts,
 )
-from pr_watch.models import SessionInfo
+from pr_watch.models import ClassifiedEvent, PullRequestRef, SessionInfo
 from pr_watch.notifications import resolve_notification_mode
 from pr_watch.setup import detect_current_repo, parse_github_remote_url
 from pr_watch.sessions import discover_sessions
@@ -31,6 +32,26 @@ PR_URL = "https://github.com/sendbird/ai-agent-js/pull/1049"
 
 def make_store(tmpdir):
     return StateStore(Path(tmpdir) / "state.sqlite")
+
+
+def make_review_event(dedupe_suffix="main"):
+    return ClassifiedEvent(
+        pr=PullRequestRef(
+            owner="sendbird",
+            repo="ai-agent-js",
+            number=1049,
+            url=PR_URL,
+            title="Improve the tool runner",
+            head_ref="review/pr-1049",
+        ),
+        role="reviewer",
+        event_type="author_push_after_review",
+        summary="teammate pushed new commits to PR #1049",
+        actor="teammate",
+        actionable=True,
+        dedupe_key=f"test:1049:{dedupe_suffix}",
+        payload={"lastPushedAt": "2026-05-11T10:00:00Z"},
+    )
 
 
 class PrWatchTests(unittest.TestCase):
@@ -408,6 +429,166 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(binding.binding_id, inbox_item.binding_id)
             self.assertIn("confirmed binding", " ".join(inbox_item.evidence))
 
+    def test_existing_state_db_migrates_bindings_active_column(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.sqlite"
+            with sqlite3.connect(path) as conn:
+                conn.executescript(
+                    """
+                    create table bindings (
+                      binding_id text primary key,
+                      repo_owner text not null,
+                      repo_name text not null,
+                      pr_number integer not null,
+                      pr_url text not null,
+                      role text not null,
+                      agent text not null,
+                      session_id text not null,
+                      cwd text not null default '',
+                      branch text not null default '',
+                      host text,
+                      confidence text not null,
+                      confirmed integer not null,
+                      confirmation_source text not null,
+                      evidence_json text not null,
+                      created_at text not null,
+                      updated_at text not null,
+                      last_event_at text not null default ''
+                    );
+                    """
+                )
+
+            StateStore(path)
+
+            with sqlite3.connect(path) as conn:
+                columns = {row[1] for row in conn.execute("pragma table_info(bindings)").fetchall()}
+            self.assertIn("active", columns)
+
+    def test_find_confirmed_binding_ignores_superseded_inactive_bindings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            old_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            new_candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-new",
+                confirmed=False,
+                confirmation_source="rebind_candidate",
+                evidence=["new candidate"],
+            )
+
+            confirmed = store.confirm_binding(new_candidate.binding_id)
+
+            self.assertTrue(confirmed.active)
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
+            self.assertEqual(confirmed.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
+
+    def test_explicit_bind_supersedes_previous_active_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            old_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            new_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-new",
+            )
+
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
+            self.assertTrue(store.get_binding(new_binding.binding_id).active)
+            self.assertEqual(new_binding.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
+
+    def test_confirm_binding_for_event_confirms_without_queueing_or_resuming(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import confirm_binding_for_event
+
+            store = make_store(tmpdir)
+            event = make_review_event()
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["session text contains exact PR URL"],
+            )
+            inbox_item = store.upsert_event(
+                event,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["first inferred binding requires approval"],
+            )
+
+            result = confirm_binding_for_event(
+                event_id=inbox_item.event_id,
+                mirror_now=False,
+                state_dir=tmpdir,
+            )
+
+            stored = store.get_event(inbox_item.event_id)
+            self.assertEqual("confirmed_binding", result["action"])
+            self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
+            self.assertEqual("pending", stored.status)
+            self.assertEqual("awaiting_approval", stored.delivery_status)
+            self.assertEqual("high", stored.confidence)
+            self.assertEqual([], store.list_queue())
+
+    def test_cli_confirm_binding_can_select_candidate_without_triggering_delivery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            inbox_item = store.upsert_event(
+                make_review_event(),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["candidate"],
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                code = main(["--state-dir", tmpdir, "confirm-binding", inbox_item.event_id, "--no-mirror"])
+
+            self.assertEqual(0, code)
+            self.assertIn("confirmed_binding", output.getvalue())
+            self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
+            self.assertEqual([], store.list_queue())
+
     def test_first_inferred_binding_requires_confirmation_before_delivery(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
@@ -602,6 +783,141 @@ class PrWatchTests(unittest.TestCase):
             self.assertIsNone(inbox_item.binding_id)
             self.assertIn("codex-first", " ".join(inbox_item.evidence))
             self.assertIn("codex-second", " ".join(inbox_item.evidence))
+
+    def test_high_confidence_different_session_requires_rebind_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            active_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            newer_session = SessionInfo(
+                agent="codex",
+                session_id="codex-new",
+                title="Active review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                host="conductor:active",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+
+            inbox_item = route_event(store, make_review_event("rebind"), sessions=[newer_session])
+            candidate = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("awaiting_rebind_confirmation", inbox_item.delivery_status)
+            self.assertEqual("high", inbox_item.confidence)
+            self.assertEqual("codex-new", candidate.session_id)
+            self.assertFalse(candidate.confirmed)
+            self.assertEqual("rebind_candidate", candidate.confirmation_source)
+            self.assertEqual(active_binding.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
+
+            rerouted = route_event(store, make_review_event("rebind"), sessions=[])
+
+            self.assertEqual("needs_confirmation", rerouted.status)
+            self.assertEqual("awaiting_rebind_confirmation", rerouted.delivery_status)
+            self.assertEqual(candidate.binding_id, rerouted.binding_id)
+
+    def test_confirmed_rebind_supersedes_previous_active_handler_for_future_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import confirm_binding_for_event
+
+            store = make_store(tmpdir)
+            old_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            new_session = SessionInfo(
+                agent="codex",
+                session_id="codex-new",
+                title="Active review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                host="conductor:active",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+            rebind_item = route_event(store, make_review_event("rebind-confirm"), sessions=[new_session])
+
+            result = confirm_binding_for_event(store, rebind_item.event_id, mirror_now=False)
+            next_item = route_event(store, make_review_event("future"), sessions=[])
+
+            self.assertEqual("confirmed_binding", result["action"])
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
+            self.assertEqual("codex-new", store.find_confirmed_binding(make_review_event()).session_id)
+            self.assertEqual(rebind_item.binding_id, next_item.binding_id)
+            self.assertEqual("awaiting_approval", next_item.delivery_status)
+
+    def test_ambiguous_rebind_candidates_do_not_use_old_active_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            active_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            first = SessionInfo(
+                agent="codex",
+                session_id="codex-first",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+            second = SessionInfo(
+                agent="codex",
+                session_id="codex-second",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=f"Continuing review for {PR_URL}",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+
+            inbox_item = route_event(store, make_review_event("ambiguous-rebind"), sessions=[first, second])
+
+            self.assertEqual("pending", inbox_item.status)
+            self.assertEqual("ambiguous_session_candidates", inbox_item.delivery_status)
+            self.assertIsNone(inbox_item.binding_id)
+            self.assertEqual(active_binding.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
+
+    def test_low_confidence_different_session_does_not_use_old_active_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            active_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            weak_session = SessionInfo(
+                agent="codex",
+                session_id="codex-weak",
+                title="General repo work",
+                cwd="/repo/ai-agent-js",
+                branch="main",
+                text="Working somewhere in sendbird/ai-agent-js",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+
+            inbox_item = route_event(store, make_review_event("low-rebind"), sessions=[weak_session])
+
+            self.assertEqual("pending", inbox_item.status)
+            self.assertEqual("inbox_only", inbox_item.delivery_status)
+            self.assertEqual("low", inbox_item.confidence)
+            self.assertIsNone(inbox_item.binding_id)
+            self.assertEqual(active_binding.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
 
     def test_desktop_notification_does_not_resume_or_queue(self):
         with tempfile.TemporaryDirectory() as tmpdir:

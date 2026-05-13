@@ -58,6 +58,7 @@ class Binding:
     host: Optional[str] = None
     confidence: str = "high"
     confirmed: bool = False
+    active: bool = True
     confirmation_source: str = "inferred_candidate"
     evidence: List[str] = field(default_factory=list)
     created_at: str = ""

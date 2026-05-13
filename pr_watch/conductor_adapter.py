@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .models import Binding, InboxItem
 from .util import utc_now
@@ -69,6 +69,48 @@ def mirror_event_to_conductor(
     event: InboxItem,
     binding: Binding,
 ) -> ConductorMirrorResult:
+    return _mirror_message_to_conductor(
+        path,
+        event,
+        binding,
+        marker=f"pr-watch:event_id={event.event_id}",
+        action="mirrored",
+        already_action="already_synced",
+        already_message="event already mirrored into Conductor",
+        success_message="event mirrored into Conductor as an assistant-role synthetic message",
+        content_factory=render_conductor_message,
+    )
+
+
+def mirror_confirmation_to_conductor(
+    path: Optional[str | Path],
+    event: InboxItem,
+    binding: Binding,
+) -> ConductorMirrorResult:
+    return _mirror_message_to_conductor(
+        path,
+        event,
+        binding,
+        marker=f"pr-watch:confirm_event_id={event.event_id}",
+        action="confirmation_requested",
+        already_action="confirmation_already_requested",
+        already_message="binding confirmation request already mirrored into Conductor",
+        success_message="binding confirmation request mirrored into Conductor",
+        content_factory=render_conductor_confirmation_message,
+    )
+
+
+def _mirror_message_to_conductor(
+    path: Optional[str | Path],
+    event: InboxItem,
+    binding: Binding,
+    marker: str,
+    action: str,
+    already_action: str,
+    already_message: str,
+    success_message: str,
+    content_factory: Callable[[InboxItem, str, str], str],
+) -> ConductorMirrorResult:
     status = check_conductor_db(path)
     if not status.available:
         return ConductorMirrorResult(status.status, event.event_id, message=status.message)
@@ -86,19 +128,19 @@ def mirror_event_to_conductor(
                 )
 
             session_id = str(session["id"])
-            existing_message_id = _find_existing_message_id(conn, session_id, event.event_id)
+            existing_message_id = _find_existing_message_id(conn, session_id, marker)
             if existing_message_id:
                 return ConductorMirrorResult(
-                    "already_synced",
+                    already_action,
                     event.event_id,
                     session_id=session_id,
                     message_id=existing_message_id,
-                    message="event already mirrored into Conductor",
+                    message=already_message,
                 )
 
             message_id = str(uuid.uuid4())
             created_at = utc_now()
-            content = render_conductor_message(event, session_id=session_id, message_id=message_id)
+            content = content_factory(event, session_id=session_id, message_id=message_id)
             conn.execute(
                 """
                 insert into session_messages (
@@ -122,11 +164,11 @@ def mirror_event_to_conductor(
         return ConductorMirrorResult("failed", event.event_id, message=str(exc))
 
     return ConductorMirrorResult(
-        "mirrored",
+        action,
         event.event_id,
         session_id=session_id,
         message_id=message_id,
-        message="event mirrored into Conductor as an assistant-role synthetic message",
+        message=success_message,
     )
 
 
@@ -144,6 +186,39 @@ def render_conductor_message(event: InboxItem, session_id: str = "", message_id:
             "This was inserted by the experimental local Conductor host bridge.",
         ]
     )
+    return _render_assistant_payload(event, text, session_id=session_id, message_id=message_id)
+
+
+def render_conductor_confirmation_message(event: InboxItem, session_id: str = "", message_id: str = "") -> str:
+    text = "\n".join(
+        [
+            "PR Watch binding confirmation needed (synthetic, not user input)",
+            f"Confirm this session should handle PR #{event.pr_number}.",
+            f"Event: {event.summary}",
+            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
+            f"Role: {event.role}",
+            f"Type: {event.event_type}",
+            f"GitHub: {event.pr_url}",
+            f"pr-watch:confirm_event_id={event.event_id}",
+            "Use the pr-watch MCP tool confirm_binding_for_event for this event if this is the right session.",
+        ]
+    )
+    return _render_assistant_payload(
+        event,
+        text,
+        session_id=session_id,
+        message_id=message_id,
+        marker={"confirm_event_id": event.event_id},
+    )
+
+
+def _render_assistant_payload(
+    event: InboxItem,
+    text: str,
+    session_id: str = "",
+    message_id: str = "",
+    marker: Optional[dict[str, str]] = None,
+) -> str:
     return json.dumps(
         {
             "type": "assistant",
@@ -169,7 +244,7 @@ def render_conductor_message(event: InboxItem, session_id: str = "", message_id:
             "parent_tool_use_id": None,
             "session_id": session_id,
             "uuid": message_id or event.event_id,
-            "pr_watch": {"event_id": event.event_id},
+            "pr_watch": marker or {"event_id": event.event_id},
         },
         ensure_ascii=False,
     )
@@ -212,15 +287,14 @@ def _find_session(conn: sqlite3.Connection, binding_session_id: str) -> Optional
     ).fetchone()
 
 
-def _find_existing_message_id(conn: sqlite3.Connection, session_id: str, event_id: str) -> str:
-    marker = f"%pr-watch:event_id={event_id}%"
+def _find_existing_message_id(conn: sqlite3.Connection, session_id: str, marker: str) -> str:
     row = conn.execute(
         """
         select id from session_messages
         where session_id = ? and content like ?
         limit 1
         """,
-        (session_id, marker),
+        (session_id, f"%{marker}%"),
     ).fetchone()
     return str(row["id"]) if row else ""
 

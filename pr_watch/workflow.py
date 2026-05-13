@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .models import Binding, ClassifiedEvent, InboxItem, PullRequestRef, SessionInfo
 from .state import StateStore
@@ -45,7 +46,7 @@ def create_explicit_binding(
     repo: Optional[str] = None,
 ) -> Binding:
     pr_ref = parse_pr_reference(pr, repo=repo)
-    return store.create_binding(
+    binding = store.create_binding(
         repo_owner=pr_ref.owner,
         repo_name=pr_ref.repo,
         pr_number=pr_ref.number,
@@ -61,11 +62,139 @@ def create_explicit_binding(
         confirmation_source="explicit_bind",
         evidence=["explicit user binding"],
     )
+    store.deactivate_confirmed_bindings(
+        binding.repo_owner,
+        binding.repo_name,
+        binding.pr_number,
+        binding.role,
+        except_binding_id=binding.binding_id,
+    )
+    return binding
+
+
+def confirm_binding_for_event(
+    store: StateStore,
+    event_id: str,
+    session_id: Optional[str] = None,
+    mirror_now: bool = True,
+    trigger: bool = False,
+    host: str = "conductor",
+    conductor_db_path: Optional[str | Path] = None,
+    session_state: str = "unknown",
+    busy_policy: Optional[str] = None,
+    runner: Optional[object] = None,
+) -> Dict[str, Any]:
+    event = store.get_event(event_id)
+    binding = binding_for_confirmation(store, event, session_id=session_id)
+    source = "user_confirmed_rebind" if event.delivery_status == "awaiting_rebind_confirmation" else "user_confirmed"
+    confirmed = store.confirm_binding(binding.binding_id, source=source)
+    updated = store.update_event(
+        event.event_id,
+        status="pending",
+        delivery_status="awaiting_approval",
+        binding_id=confirmed.binding_id,
+        confidence="high",
+        evidence=event.evidence + [f"user confirmed active binding {confirmed.agent}:{confirmed.session_id}"],
+        recovery_command="",
+        error="",
+    )
+
+    host_sync = None
+    if mirror_now:
+        from .host_adapter import sync_once
+
+        host_sync = sync_once(
+            store,
+            hosts=[host],
+            conductor_db_path=conductor_db_path,
+            trigger_confirmed=False,
+            event_ids=[event.event_id],
+        )
+
+    trigger_result = None
+    if trigger:
+        from .delivery import DEFAULT_BUSY_POLICY, approve_event
+
+        trigger_result = approve_event(
+            store,
+            event.event_id,
+            session_state=session_state,
+            busy_policy=busy_policy or DEFAULT_BUSY_POLICY,
+            runner=runner,
+        )
+
+    return {
+        "action": "confirmed_binding",
+        "event": updated,
+        "binding": confirmed,
+        "host_sync": host_sync,
+        "trigger": trigger_result,
+    }
+
+
+def binding_for_confirmation(
+    store: StateStore,
+    event: InboxItem,
+    session_id: Optional[str] = None,
+) -> Binding:
+    current = store.get_binding(event.binding_id)
+    if session_id is None:
+        if current is None:
+            raise ValueError("event has no inferred binding candidate to confirm")
+        return current
+
+    if current and current.session_id == session_id:
+        return current
+
+    existing = store.find_binding_for_session(
+        event.repo_owner,
+        event.repo_name,
+        event.pr_number,
+        event.role,
+        session_id,
+    )
+    if existing:
+        return existing
+
+    template = current or store.find_confirmed_binding(classified_event_from_inbox(event))
+    if template is None:
+        raise ValueError("cannot infer agent for selected session; bind the PR explicitly first")
+
+    binding_id = stable_id(
+        "binding",
+        f"{event.repo_owner}/{event.repo_name}",
+        event.pr_number,
+        event.role,
+        template.agent,
+        session_id,
+    )
+    return store.create_binding(
+        repo_owner=event.repo_owner,
+        repo_name=event.repo_name,
+        pr_number=event.pr_number,
+        pr_url=event.pr_url,
+        role=event.role,
+        agent=template.agent,
+        session_id=session_id,
+        cwd=template.cwd,
+        branch=template.branch,
+        host=template.host,
+        confidence="high",
+        confirmed=False,
+        active=False,
+        confirmation_source="user_selected_session",
+        evidence=event.evidence + [f"user selected session {session_id} for this PR and role"],
+        binding_id=binding_id,
+    )
 
 
 def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[SessionInfo]) -> InboxItem:
+    selection = select_session_candidate(event.pr, sessions)
     confirmed = store.find_confirmed_binding(event)
     if confirmed:
+        rebind_item = route_confirmed_event_with_session_discovery(store, event, confirmed, selection)
+        if rebind_item:
+            return rebind_item
         evidence = confirmed.evidence + ["confirmed binding matched this PR and role"]
         return store.upsert_event(
             event,
@@ -76,7 +205,6 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
             evidence=evidence,
         )
 
-    selection = select_session_candidate(event.pr, sessions)
     if selection.ambiguous_candidates:
         return store.upsert_event(
             event,
@@ -101,8 +229,87 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
     confidence = selection.candidate.confidence
     session = selection.candidate.session
     evidence = selection.candidate.evidence
+    binding = create_inferred_binding(store, event, session, confidence, evidence, "inferred_candidate")
+    return store.upsert_event(
+        event,
+        status="needs_confirmation",
+        delivery_status="awaiting_first_binding_confirmation",
+        binding_id=binding.binding_id,
+        confidence=confidence,
+        evidence=evidence + ["first inferred binding requires approval"],
+    )
+
+
+def route_confirmed_event_with_session_discovery(
+    store: StateStore,
+    event: ClassifiedEvent,
+    confirmed: Binding,
+    selection: SessionCandidateSelection,
+) -> Optional[InboxItem]:
+    if selection.ambiguous_candidates:
+        return store.upsert_event(
+            event,
+            status="pending",
+            delivery_status="ambiguous_session_candidates",
+            binding_id=None,
+            confidence=selection.ambiguous_candidates[0].confidence,
+            evidence=ambiguous_candidate_evidence(selection.ambiguous_candidates)
+            + ["active confirmed binding kept unchanged until a session is chosen"],
+        )
+
+    candidate = selection.candidate
+    if candidate is None:
+        return None
+
+    if same_session(confirmed, candidate.session):
+        return None
+
+    if candidate.confidence == "high":
+        binding = create_inferred_binding(
+            store,
+            event,
+            candidate.session,
+            candidate.confidence,
+            candidate.evidence,
+            "rebind_candidate",
+        )
+        return store.upsert_event(
+            event,
+            status="needs_confirmation",
+            delivery_status="awaiting_rebind_confirmation",
+            binding_id=binding.binding_id,
+            confidence="high",
+            evidence=candidate.evidence
+            + [
+                f"active binding still points to {confirmed.agent}:{confirmed.session_id}",
+                "confirm rebind before mirroring to the new active session",
+            ],
+        )
+
+    if candidate.confidence == "low":
+        return store.upsert_event(
+            event,
+            status="pending",
+            delivery_status="inbox_only",
+            binding_id=None,
+            confidence="low",
+            evidence=candidate.evidence
+            + ["low-confidence different session did not replace the active binding"],
+        )
+
+    return None
+
+
+def create_inferred_binding(
+    store: StateStore,
+    event: ClassifiedEvent,
+    session: SessionInfo,
+    confidence: str,
+    evidence: List[str],
+    confirmation_source: str,
+) -> Binding:
     binding_id = stable_id("binding", event.pr.repo_full_name, event.pr.number, event.role, session.agent, session.session_id)
-    binding = store.create_binding(
+    return store.create_binding(
         repo_owner=event.pr.owner,
         repo_name=event.pr.repo,
         pr_number=event.pr.number,
@@ -115,17 +322,32 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
         host=session.host,
         confidence=confidence,
         confirmed=False,
-        confirmation_source="inferred_candidate",
+        active=False,
+        confirmation_source=confirmation_source,
         evidence=evidence,
         binding_id=binding_id,
     )
-    return store.upsert_event(
-        event,
-        status="needs_confirmation",
-        delivery_status="awaiting_first_binding_confirmation",
-        binding_id=binding.binding_id,
-        confidence=confidence,
-        evidence=evidence + ["first inferred binding requires approval"],
+
+
+def same_session(binding: Binding, session: SessionInfo) -> bool:
+    return binding.agent == session.agent and binding.session_id == session.session_id
+
+
+def classified_event_from_inbox(event: InboxItem) -> ClassifiedEvent:
+    return ClassifiedEvent(
+        pr=PullRequestRef(
+            owner=event.repo_owner,
+            repo=event.repo_name,
+            number=event.pr_number,
+            url=event.pr_url,
+        ),
+        role=event.role,
+        event_type=event.event_type,
+        summary=event.summary,
+        actor=event.actor,
+        actionable=event.actionable,
+        dedupe_key=event.dedupe_key,
+        payload=event.payload,
     )
 
 

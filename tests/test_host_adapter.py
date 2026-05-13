@@ -18,6 +18,7 @@ from pr_watch.mcp_server import host_status as mcp_host_status
 from pr_watch.mcp_server import sync_host_once as mcp_sync_host_once
 from pr_watch.models import ClassifiedEvent, PullRequestRef
 from pr_watch.state import StateStore
+from pr_watch.workflow import confirm_binding_for_event
 
 
 PR_URL = "https://github.com/sendbird/ai-agent-js/pull/1049"
@@ -228,6 +229,127 @@ class HostAdapterTests(unittest.TestCase):
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
             self.assertEqual(1, count)
+
+    def test_confirm_binding_for_event_mirrors_current_event_without_triggering_resume(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["inferred candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+
+            result = confirm_binding_for_event(
+                store,
+                event.event_id,
+                mirror_now=True,
+                conductor_db_path=db_path,
+                trigger=False,
+                runner=RecordingRunner(),
+            )
+
+            self.assertEqual("confirmed_binding", result["action"])
+            self.assertEqual(["mirrored"], [item.action for item in result["host_sync"].host_results])
+            self.assertEqual([], store.list_queue())
+            self.assertEqual("pending", store.get_event(event.event_id).status)
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(1, count)
+
+    def test_host_sync_mirrors_confirmation_prompt_to_candidate_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="rebind_candidate",
+                evidence=["new candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_rebind_confirmation",
+            )
+
+            first = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+            second = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["confirmation_requested"], [item.action for item in first.host_results])
+            self.assertEqual(["confirmation_already_requested"], [item.action for item in second.host_results])
+            self.assertEqual([], store.list_queue())
+            self.assertEqual("needs_confirmation", store.get_event(event.event_id).status)
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute("select content from session_messages").fetchall()
+            self.assertEqual(1, len(rows))
+            self.assertIn(f"pr-watch:confirm_event_id={event.event_id}", rows[0][0])
+            self.assertIn("Confirm this session", rows[0][0])
+
+    def test_confirm_after_confirmation_prompt_can_still_mirror_actual_event(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+
+            sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+            confirm_binding_for_event(
+                store,
+                event.event_id,
+                mirror_now=True,
+                conductor_db_path=db_path,
+            )
+
+            with sqlite3.connect(db_path) as conn:
+                contents = [row[0] for row in conn.execute("select content from session_messages order by created_at")]
+            self.assertEqual(2, len(contents))
+            self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in item for item in contents))
+            self.assertTrue(any(f"pr-watch:event_id={event.event_id}" in item for item in contents))
 
     def test_trigger_confirmed_only_resumes_confirmed_high_confidence_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -484,6 +606,7 @@ class HostAdapterTests(unittest.TestCase):
             )
 
             self.assertEqual("completed", result.status)
+            self.assertIn("mirrored=1", result.message)
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
             self.assertEqual(1, count)

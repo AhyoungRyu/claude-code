@@ -13,6 +13,7 @@ from .host_adapter import sync_once as host_bridge_sync_once
 from .notifications import notify_event, resolve_notification_mode
 from .sessions import discover_sessions
 from .state import StateStore
+from .workflow import confirm_binding_for_event as workflow_confirm_binding_for_event
 from .workflow import create_explicit_binding
 
 
@@ -98,6 +99,35 @@ def bind_pr(
         repo=repo,
     )
     return {"binding": _to_json(binding)}
+
+
+def confirm_binding_for_event(
+    event_id: str,
+    session_id: Optional[str] = None,
+    mirror_now: bool = True,
+    trigger: bool = False,
+    host: str = "conductor",
+    conductor_db_path: Optional[str] = None,
+    session_state: str = "unknown",
+    busy_policy: Optional[str] = None,
+    state_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Confirm or reassign the active PR/session binding without approving delivery."""
+    state_dir = _effective_state_dir(state_dir)
+    config = load_config(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = workflow_confirm_binding_for_event(
+        store,
+        event_id,
+        session_id=session_id,
+        mirror_now=mirror_now,
+        trigger=trigger,
+        host=host,
+        conductor_db_path=conductor_db_path,
+        session_state=session_state,
+        busy_policy=busy_policy or config.get("busy_policy", "run_if_idle_queue_if_busy"),
+    )
+    return _to_json(result)
 
 
 def approve(
@@ -266,6 +296,7 @@ def build_server() -> Any:
     server.tool()(list_inbox)
     server.tool()(show_pending_pr_actions)
     server.tool()(bind_pr)
+    server.tool()(confirm_binding_for_event)
     server.tool()(approve)
     server.tool()(approve_resume_session)
     server.tool()(queue_resume_session)

@@ -38,6 +38,7 @@ class StateStore:
                   host text,
                   confidence text not null,
                   confirmed integer not null,
+                  active integer not null default 1,
                   confirmation_source text not null,
                   evidence_json text not null,
                   created_at text not null,
@@ -120,6 +121,12 @@ class StateStore:
                 );
                 """
             )
+            self._migrate_bindings(conn)
+
+    def _migrate_bindings(self, conn: sqlite3.Connection) -> None:
+        columns = {str(row["name"]) for row in conn.execute("pragma table_info(bindings)").fetchall()}
+        if "active" not in columns:
+            conn.execute("alter table bindings add column active integer not null default 1")
 
     def upsert_binding(self, binding: Binding) -> Binding:
         now = utc_now()
@@ -138,6 +145,7 @@ class StateStore:
             host=binding.host,
             confidence=binding.confidence,
             confirmed=binding.confirmed,
+            active=binding.active,
             confirmation_source=binding.confirmation_source,
             evidence=binding.evidence,
             created_at=created_at,
@@ -150,8 +158,8 @@ class StateStore:
                 insert into bindings (
                   binding_id, repo_owner, repo_name, pr_number, pr_url, role,
                   agent, session_id, cwd, branch, host, confidence, confirmed,
-                  confirmation_source, evidence_json, created_at, updated_at, last_event_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  active, confirmation_source, evidence_json, created_at, updated_at, last_event_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(binding_id) do update set
                   agent=excluded.agent,
                   session_id=excluded.session_id,
@@ -160,6 +168,7 @@ class StateStore:
                   host=excluded.host,
                   confidence=excluded.confidence,
                   confirmed=excluded.confirmed,
+                  active=excluded.active,
                   confirmation_source=excluded.confirmation_source,
                   evidence_json=excluded.evidence_json,
                   updated_at=excluded.updated_at,
@@ -179,6 +188,7 @@ class StateStore:
                     updated.host,
                     updated.confidence,
                     int(updated.confirmed),
+                    int(updated.active),
                     updated.confirmation_source,
                     json.dumps(updated.evidence),
                     updated.created_at,
@@ -202,6 +212,7 @@ class StateStore:
         host: Optional[str] = None,
         confidence: str = "high",
         confirmed: bool = False,
+        active: bool = True,
         confirmation_source: str = "inferred_candidate",
         evidence: Optional[List[str]] = None,
         binding_id: Optional[str] = None,
@@ -221,6 +232,7 @@ class StateStore:
                 host=host,
                 confidence=confidence,
                 confirmed=confirmed,
+                active=active,
                 confirmation_source=confirmation_source,
                 evidence=evidence or [],
             )
@@ -244,12 +256,42 @@ class StateStore:
             host=binding.host,
             confidence="high",
             confirmed=True,
+            active=True,
             confirmation_source=source,
             evidence=binding.evidence + ["user confirmed first PR/session binding"],
             created_at=binding.created_at,
             last_event_at=binding.last_event_at,
         )
+        self.deactivate_confirmed_bindings(
+            confirmed.repo_owner,
+            confirmed.repo_name,
+            confirmed.pr_number,
+            confirmed.role,
+            except_binding_id=confirmed.binding_id,
+        )
         return self.upsert_binding(confirmed)
+
+    def deactivate_confirmed_bindings(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+        role: str,
+        except_binding_id: Optional[str] = None,
+    ) -> int:
+        query = """
+            update bindings
+            set active = 0, updated_at = ?
+            where repo_owner = ? and repo_name = ? and pr_number = ?
+              and role = ? and confirmed = 1 and active = 1
+        """
+        params: List[Any] = [utc_now(), repo_owner, repo_name, pr_number, role]
+        if except_binding_id:
+            query += " and binding_id <> ?"
+            params.append(except_binding_id)
+        with self.connect() as conn:
+            cursor = conn.execute(query, tuple(params))
+        return cursor.rowcount
 
     def get_binding(self, binding_id: Optional[str]) -> Optional[Binding]:
         if not binding_id:
@@ -264,11 +306,32 @@ class StateStore:
                 """
                 select * from bindings
                 where repo_owner = ? and repo_name = ? and pr_number = ?
-                  and role = ? and confirmed = 1
+                  and role = ? and confirmed = 1 and active = 1
                 order by updated_at desc
                 limit 1
                 """,
                 (event.pr.owner, event.pr.repo, event.pr.number, event.role),
+            ).fetchone()
+        return _binding_from_row(row) if row else None
+
+    def find_binding_for_session(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_number: int,
+        role: str,
+        session_id: str,
+    ) -> Optional[Binding]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select * from bindings
+                where repo_owner = ? and repo_name = ? and pr_number = ?
+                  and role = ? and session_id = ?
+                order by updated_at desc
+                limit 1
+                """,
+                (repo_owner, repo_name, pr_number, role, session_id),
             ).fetchone()
         return _binding_from_row(row) if row else None
 
@@ -322,9 +385,15 @@ class StateStore:
         created_at = existing.created_at if existing else now
         next_status = status
         next_delivery_status = delivery_status
+        next_binding_id = binding_id
+        next_confidence = confidence
+        next_evidence = list(evidence)
         if existing and _should_preserve_delivery_state(existing):
             next_status = existing.status
             next_delivery_status = existing.delivery_status
+            next_binding_id = existing.binding_id
+            next_confidence = existing.confidence
+            next_evidence = existing.evidence
         with self.connect() as conn:
             conn.execute(
                 """
@@ -356,9 +425,9 @@ class StateStore:
                     int(event.actionable),
                     next_status,
                     next_delivery_status,
-                    binding_id,
-                    confidence,
-                    json.dumps(list(evidence)),
+                    next_binding_id,
+                    next_confidence,
+                    json.dumps(next_evidence),
                     dumps(event.payload),
                     created_at,
                     now,
@@ -617,6 +686,7 @@ def _binding_from_row(row: sqlite3.Row) -> Binding:
         host=row["host"],
         confidence=row["confidence"],
         confirmed=bool(row["confirmed"]),
+        active=bool(row["active"]),
         confirmation_source=row["confirmation_source"],
         evidence=json.loads(row["evidence_json"] or "[]"),
         created_at=row["created_at"],
@@ -657,6 +727,8 @@ def _should_preserve_delivery_state(existing: InboxItem) -> bool:
         "delivered",
         "dropped",
         "failed",
+        "awaiting_first_binding_confirmation",
+        "awaiting_rebind_confirmation",
         "notify_only",
         "queued",
     }

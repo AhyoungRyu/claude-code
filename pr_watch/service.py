@@ -353,13 +353,21 @@ def _host_sync_message(host_results: list[object], trigger_count: int) -> str:
     if not host_results and not trigger_count:
         return "host sync: no eligible pending host events"
     mirrored = sum(1 for item in host_results if getattr(item, "action", "") == "mirrored")
+    confirmations = sum(1 for item in host_results if getattr(item, "action", "") == "confirmation_requested")
     already = sum(1 for item in host_results if getattr(item, "action", "") == "already_synced")
+    already_confirmations = sum(
+        1 for item in host_results if getattr(item, "action", "") == "confirmation_already_requested"
+    )
     failed = sum(
         1
         for item in host_results
         if getattr(item, "action", "") in {"failed", "missing", "schema_mismatch", "unavailable"}
     )
-    return f"host sync: mirrored={mirrored} already_synced={already} failed={failed} triggered={trigger_count}"
+    return (
+        f"host sync: mirrored={mirrored} confirmation_requested={confirmations} "
+        f"already_synced={already} confirmation_already_requested={already_confirmations} "
+        f"failed={failed} triggered={trigger_count}"
+    )
 
 
 @contextmanager

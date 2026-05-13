@@ -31,6 +31,7 @@ from .setup import detect_current_repo
 from .sessions import discover_sessions
 from .state import StateStore
 from .util import normalize_repo_full_name
+from .workflow import confirm_binding_for_event as workflow_confirm_binding_for_event
 from .workflow import create_explicit_binding
 
 
@@ -65,6 +66,37 @@ def main(argv: Optional[List[str]] = None) -> int:
                 repo=args.repo,
             )
             print(f"bound {binding.pr_url} to {binding.agent}:{binding.session_id} ({binding.role})")
+            return 0
+        if args.command == "confirm-binding":
+            store = StateStore(state_db_path(args.state_dir))
+            config = load_config(args.state_dir)
+            result = workflow_confirm_binding_for_event(
+                store,
+                args.event_id,
+                session_id=args.session_id,
+                mirror_now=args.mirror_now,
+                trigger=args.trigger,
+                host=args.host,
+                conductor_db_path=args.conductor_db,
+                session_state=args.session_state,
+                busy_policy=args.busy_policy or config.get("busy_policy", DEFAULT_BUSY_POLICY),
+            )
+            binding = result["binding"]
+            print(f"{result['action']}: {args.event_id}")
+            print(f"binding: {binding.agent}:{binding.session_id}")
+            host_sync = result.get("host_sync")
+            if host_sync:
+                for item in host_sync.host_results:
+                    target = f"\ttarget={item.target_id}" if item.target_id else ""
+                    event = item.event_id or "-"
+                    print(f"{item.host}\t{event}\t{item.action}{target}")
+                    if item.message:
+                        print(f"  {item.message}")
+            trigger_result = result.get("trigger")
+            if trigger_result:
+                print(f"trigger\t{trigger_result.event_id}\t{trigger_result.action}")
+                if trigger_result.message:
+                    print(trigger_result.message)
             return 0
         if args.command == "daemon":
             store = StateStore(state_db_path(args.state_dir))
@@ -249,6 +281,22 @@ def build_parser() -> argparse.ArgumentParser:
     bind.add_argument("--cwd", default="")
     bind.add_argument("--branch", default="")
     bind.add_argument("--host")
+
+    confirm = subparsers.add_parser(
+        "confirm-binding",
+        help="confirm an inferred or rebind PR/session binding without approving delivery",
+    )
+    confirm.add_argument("event_id")
+    confirm.add_argument("--session-id", help="confirm or reassign to this session for the same PR and role")
+    confirm.add_argument("--no-mirror", dest="mirror_now", action="store_false", default=True)
+    confirm.add_argument("--host", choices=["conductor"], default="conductor")
+    confirm.add_argument("--conductor-db", help="override Conductor SQLite DB path for immediate mirror")
+    confirm.add_argument("--trigger", action="store_true", help="also approve/queue/resume after confirming")
+    confirm.add_argument("--session-state", choices=["idle", "working", "unknown"], default="unknown")
+    confirm.add_argument(
+        "--busy-policy",
+        choices=["run_if_idle_queue_if_busy", "always_queue", "notify_only", "drop_if_busy", "ask_when_busy"],
+    )
 
     approve = subparsers.add_parser("approve", help="approve delivery for an inbox event")
     approve.add_argument("event_id")

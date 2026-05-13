@@ -4,7 +4,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from .conductor_adapter import ConductorStatus, check_conductor_db, mirror_event_to_conductor
+from .conductor_adapter import (
+    ConductorStatus,
+    check_conductor_db,
+    mirror_confirmation_to_conductor,
+    mirror_event_to_conductor,
+)
 from .delivery import DEFAULT_BUSY_POLICY, approve_event
 from .models import Binding, InboxItem
 from .state import StateStore
@@ -64,9 +69,13 @@ def sync_once(
     runner: Optional[object] = None,
     session_state: str = "unknown",
     busy_policy: str = DEFAULT_BUSY_POLICY,
+    event_ids: Optional[Iterable[str]] = None,
 ) -> HostSyncResult:
     selected_hosts = _normalize_hosts(hosts)
     events = store.list_events(include_done=False)
+    if event_ids is not None:
+        selected_event_ids = set(event_ids)
+        events = [event for event in events if event.event_id in selected_event_ids]
     host_results: List[HostEventResult] = []
 
     if "conductor" in selected_hosts:
@@ -118,6 +127,19 @@ def _sync_conductor(
 
     for event in events:
         binding = store.get_binding(event.binding_id)
+        if _needs_binding_confirmation(event, binding):
+            assert binding is not None
+            mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
+            results.append(
+                HostEventResult(
+                    host="conductor",
+                    event_id=event.event_id,
+                    action=mirrored.action,
+                    target_id=mirrored.session_id or binding.session_id,
+                    message=mirrored.message,
+                )
+            )
+            continue
         if not _has_confirmed_binding(event, binding):
             continue
         assert binding is not None
@@ -183,9 +205,21 @@ def _has_confirmed_binding(event: InboxItem, binding: Optional[Binding]) -> bool
     return (
         binding is not None
         and binding.confirmed
+        and binding.active
         and event.binding_id == binding.binding_id
         and event.status == "pending"
         and event.confidence == "high"
+    )
+
+
+def _needs_binding_confirmation(event: InboxItem, binding: Optional[Binding]) -> bool:
+    return (
+        binding is not None
+        and not binding.confirmed
+        and event.status == "needs_confirmation"
+        and event.confidence == "high"
+        and event.delivery_status
+        in {"awaiting_first_binding_confirmation", "awaiting_rebind_confirmation"}
     )
 
 

@@ -114,6 +114,24 @@ pr-watch host sync-once --host conductor
 pr-watch host sync-once --host conductor --trigger-confirmed
 ```
 
+Confirm an inferred or rebind candidate without approving delivery:
+
+```bash
+pr-watch confirm-binding evt_123 --no-mirror
+pr-watch confirm-binding evt_123 --conductor-db "$HOME/Library/Application Support/com.conductor.app/conductor.db"
+```
+
+`confirm-binding` updates the active PR/session binding and returns the event to
+`pending` / `awaiting_approval` at high confidence. By default it mirrors the
+current event to Conductor immediately when a Conductor DB is available. It does
+not resume or queue the session unless `--trigger` is passed. Use `approve`
+when you are ready to deliver work to the confirmed session.
+
+When host sync sees a high-confidence inferred or rebind candidate that still
+needs confirmation, it can also mirror a short confirmation request into the
+candidate Conductor session. That prompt is separate from the final PR update
+mirror, so confirming the event can still mirror the actual update afterward.
+
 The same bridge is exposed through MCP as `host_status` and `sync_host_once`
 for hosts that can explicitly call MCP tools. These tools still do not make the
 host app subscribe to PR Watch automatically; they provide the bridge action
@@ -125,7 +143,7 @@ Host surfaces are intentionally different:
 |---------|--------------|---------------------|
 | Desktop notification | Sends a local macOS notification when polling or `notify` runs | Does not approve, resume, queue, or update app unread state |
 | In-app MCP inbox | Stores durable `in_app` notifications readable through MCP tools | Does not make Codex App show an automatic badge or popup by itself |
-| Conductor mirror | Experimental/private-surface SQLite adapter that inserts an assistant-role synthetic PR Watch message into the matched Conductor session and marks its session/workspace unread | Does not send user input, execute the session, or use Conductor's sidecar socket |
+| Conductor mirror | Experimental/private-surface SQLite adapter that inserts assistant-role synthetic PR Watch update or binding-confirmation messages into the matched Conductor session and marks its session/workspace unread | Does not send user input, execute the session, or use Conductor's sidecar socket |
 | Confirmed-binding auto-trigger | With `--trigger-confirmed`, approves/queues/resumes only confirmed, high-confidence bindings | Does not auto-confirm first inferred bindings; ambiguous or low-confidence events stay pending |
 
 Codex App support is currently diagnostic only for push-style UI. MCP
@@ -213,6 +231,19 @@ Approve a resume after reviewing the notification:
 }
 ```
 
+Confirm an inferred binding or active-handler rebind without delivery:
+
+```json
+{
+  "tool": "confirm_binding_for_event",
+  "arguments": {
+    "event_id": "evt_123",
+    "mirror_now": true,
+    "trigger": false
+  }
+}
+```
+
 Show and acknowledge in-app notifications:
 
 ```json
@@ -237,6 +268,7 @@ Useful MCP tools:
 |------|-----|
 | `check_pr_updates` | Poll GitHub once and record actionable PR events |
 | `show_pending_pr_actions` | Show events waiting for user approval or binding |
+| `confirm_binding_for_event` | Confirm or reassign the active PR/session binding without delivery |
 | `approve_resume_session` | Approve delivery to the matched session |
 | `queue_resume_session` | Queue delivery without trying to run immediately |
 | `show_in_app_notifications` | Show app-hosted notification inbox items |
@@ -355,12 +387,19 @@ webhook service. Low-confidence events stay in the inbox, first inferred
 bindings require approval, and unknown session state is treated as busy so
 approved work queues by default.
 
-When several local sessions match the same PR, `pr-watch` keeps confirmed
-bindings sticky first. For a new inferred binding, it prefers active/focused
-host sessions when that signal is available, then stronger PR evidence, then
-the newest `last_activity_at`. If multiple medium-or-better candidates are
-still tied, the event stays in the inbox with `ambiguous_session_candidates`
-until the user explicitly binds the PR to one session.
+Confirmed bindings are mutable active-handler pointers. When a new high
+confidence session candidate appears for the same PR and role, `pr-watch` keeps
+the old binding active but marks the event `needs_confirmation` /
+`awaiting_rebind_confirmation` for the new candidate. Confirming that candidate
+supersedes the previous binding for future events. Ambiguous or low-confidence
+different candidates stay as manual inbox decisions and are not mirrored to the
+old active session for that event.
+
+When several local sessions match the same PR, `pr-watch` prefers
+active/focused host sessions when that signal is available, then stronger PR
+evidence, then the newest `last_activity_at`. If multiple medium-or-better
+candidates are still tied, the event stays in the inbox with
+`ambiguous_session_candidates` until the user explicitly chooses one session.
 
 `pr-watch` also treats comments on GitHub issues linked from a PR as actionable
 PR context. It follows GitHub's `closingIssuesReferences` plus issue references
