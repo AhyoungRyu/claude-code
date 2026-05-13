@@ -303,6 +303,7 @@ class HostAdapterTests(unittest.TestCase):
 
             self.assertEqual(["confirmation_requested"], [item.action for item in first.host_results])
             self.assertEqual(["confirmation_already_requested"], [item.action for item in second.host_results])
+            self.assertIsNotNone(store.get_host_sync(event.event_id, "conductor_confirmation", candidate.session_id))
             self.assertEqual([], store.list_queue())
             self.assertEqual("needs_confirmation", store.get_event(event.event_id).status)
             with sqlite3.connect(db_path) as conn:
