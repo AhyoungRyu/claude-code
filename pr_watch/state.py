@@ -546,6 +546,65 @@ class StateStore:
             )
         return len(rows)
 
+    def dismiss_stale_current_pr_events(
+        self,
+        repo: str,
+        open_pr_numbers: Iterable[int],
+        current_dedupe_keys: Iterable[str],
+    ) -> int:
+        normalized = normalize_repo_full_name(repo)
+        repo_owner, repo_name = normalized.split("/", 1)
+        live_numbers = sorted({int(number) for number in open_pr_numbers})
+        if not live_numbers:
+            return 0
+
+        current_keys = sorted({str(key) for key in current_dedupe_keys if key})
+        number_placeholders = ", ".join("?" for _ in live_numbers)
+        params: List[Any] = [repo_owner, repo_name, *live_numbers]
+        query = f"""
+            select event_id from events
+            where lower(repo_owner) = ? and lower(repo_name) = ?
+              and pr_number in ({number_placeholders})
+              and status in ('pending', 'needs_confirmation', 'queued')
+        """
+        if current_keys:
+            key_placeholders = ", ".join("?" for _ in current_keys)
+            query += f" and dedupe_key not in ({key_placeholders})"
+            params.extend(current_keys)
+
+        now = utc_now()
+        error = (
+            f"Event is no longer present in the current actionable PR state for {normalized}; "
+            "the underlying condition may have been resolved."
+        )
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            if not rows:
+                return 0
+            event_ids = [row["event_id"] for row in rows]
+            conn.executemany(
+                """
+                update events set
+                  status = 'dismissed',
+                  delivery_status = 'stale_pr_event_not_current',
+                  recovery_command = '',
+                  error = ?,
+                  updated_at = ?
+                where event_id = ?
+                """,
+                [(error, now, event_id) for event_id in event_ids],
+            )
+            conn.executemany(
+                """
+                update queue set
+                  status = 'stale_pr_event_not_current',
+                  updated_at = ?
+                where event_id = ? and status = 'queued'
+                """,
+                [(now, event_id) for event_id in event_ids],
+            )
+        return len(rows)
+
     def enqueue(self, event_id: str, command: List[str], prompt: str) -> QueueItem:
         now = utc_now()
         queue_id = random_id("queue")

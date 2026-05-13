@@ -211,11 +211,15 @@ def poll_once(
 
     session_list = list(sessions or [])
     routed: List[InboxItem] = []
+    current_dedupe_keys: List[str] = []
     for pr in prs:
         if pr.get("isDraft") and not include_drafts:
             continue
         for event in classify_pr(pr, current_user_login):
+            current_dedupe_keys.append(event.dedupe_key)
             routed.append(route_event(store, event, session_list))
+    if reconcile_repo:
+        store.dismiss_stale_current_pr_events(reconcile_repo, open_numbers, current_dedupe_keys)
     notify_events(store, routed, mode=notification_mode, notifier=notifier, host=notification_host)
     return routed
 

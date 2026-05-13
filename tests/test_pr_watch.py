@@ -54,7 +54,7 @@ def make_review_event(dedupe_suffix="main"):
     )
 
 
-def make_inbox_event(owner, repo, number, dedupe_suffix, role="reviewer"):
+def make_inbox_event(owner, repo, number, dedupe_suffix, role="reviewer", event_type="author_push_after_review"):
     return ClassifiedEvent(
         pr=PullRequestRef(
             owner=owner,
@@ -65,7 +65,7 @@ def make_inbox_event(owner, repo, number, dedupe_suffix, role="reviewer"):
             head_ref=f"pr-{number}",
         ),
         role=role,
-        event_type="author_push_after_review",
+        event_type=event_type,
         summary=f"PR #{number} needs attention",
         actor="teammate",
         actionable=True,
@@ -1388,6 +1388,52 @@ class PrWatchTests(unittest.TestCase):
             stored = store.get_event(stale_queued.event_id)
             self.assertEqual("dismissed", stored.status)
             self.assertEqual("stale_pr_not_open", stored.delivery_status)
+            self.assertEqual([], store.list_queue())
+
+    def test_poll_once_dismisses_open_pr_events_no_longer_classified_as_actionable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1058,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                    "author": {"login": "irene"},
+                    "mergeStateStatus": "BLOCKED",
+                    "mergeable": "MERGEABLE",
+                    "updatedAt": "2026-05-12T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            stale_conflict = store.upsert_event(
+                make_inbox_event(
+                    "sendbird",
+                    "ai-agent-js",
+                    1058,
+                    "stale-conflict",
+                    role="author",
+                    event_type="merge_conflict",
+                ),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=None,
+                confidence="high",
+                evidence=["old false conflict"],
+            )
+            store.enqueue(stale_conflict.event_id, ["codex", "resume", "session", "prompt"], "prompt")
+
+            poll_once(store, "irene", repo="sendbird/ai-agent-js", fixture=str(fixture), sessions=[])
+
+            stored = store.get_event(stale_conflict.event_id)
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("stale_pr_event_not_current", stored.delivery_status)
+            self.assertIn("no longer present in the current actionable PR state", stored.error)
             self.assertEqual([], store.list_queue())
 
     def test_idle_resume_failure_preserves_inbox_item_with_recovery_command(self):
