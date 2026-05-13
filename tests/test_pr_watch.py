@@ -1,3 +1,4 @@
+import plistlib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -1227,6 +1228,172 @@ class PrWatchTests(unittest.TestCase):
             self.assertIn("codex-app", text)
             self.assertIn("conductor", text)
             self.assertIn("/opt/pr-watch/bin/python -m pr_watch --state-dir", text)
+
+    def test_watch_repo_state_and_cli_manage_repositories(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+
+            self.assertEqual([], store.list_watch_repos())
+            self.assertEqual("sendbird/ai-agent-js", store.add_watch_repo("Sendbird/AI-Agent-JS"))
+            self.assertEqual(["sendbird/ai-agent-js"], store.list_watch_repos())
+            self.assertEqual("sendbird/ai-agent-js", store.add_watch_repo("sendbird/ai-agent-js"))
+            self.assertEqual(["sendbird/ai-agent-js"], store.list_watch_repos())
+
+            output = StringIO()
+            with redirect_stdout(output):
+                add_code = main(["--state-dir", tmpdir, "watch", "add", "AhyoungRyu/claude-code"])
+                list_code = main(["--state-dir", tmpdir, "watch", "list"])
+                remove_code = main(["--state-dir", tmpdir, "watch", "remove", "sendbird/ai-agent-js"])
+                clear_code = main(["--state-dir", tmpdir, "watch", "clear"])
+
+            self.assertEqual(0, add_code)
+            self.assertEqual(0, list_code)
+            self.assertEqual(0, remove_code)
+            self.assertEqual(0, clear_code)
+            self.assertIn("watching ahyoungryu/claude-code", output.getvalue())
+            self.assertIn("sendbird/ai-agent-js", output.getvalue())
+            self.assertEqual([], store.list_watch_repos())
+
+    def test_launchd_plist_runs_service_once_on_interval(self):
+        from pr_watch.service import build_launchd_plist
+
+        plist = build_launchd_plist(
+            label="com.example.pr-watch.test",
+            python_executable="/opt/pr-watch/bin/python",
+            state_dir="/tmp/pr-watch-state",
+            interval_seconds=120,
+            stdout_path="/tmp/pr-watch.out.log",
+            stderr_path="/tmp/pr-watch.err.log",
+        )
+
+        payload = plistlib.loads(plist.encode("utf-8"))
+        self.assertEqual("com.example.pr-watch.test", payload["Label"])
+        self.assertEqual(120, payload["StartInterval"])
+        self.assertEqual("/tmp/pr-watch.out.log", payload["StandardOutPath"])
+        self.assertEqual("/tmp/pr-watch.err.log", payload["StandardErrorPath"])
+        self.assertEqual(
+            [
+                "/opt/pr-watch/bin/python",
+                "-m",
+                "pr_watch",
+                "--state-dir",
+                "/tmp/pr-watch-state",
+                "service",
+                "run-once",
+            ],
+            payload["ProgramArguments"],
+        )
+
+    def test_service_install_writes_plist_config_and_records_launchctl(self):
+        from pr_watch.service import RecordingLaunchdRunner, install_launchd_service
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir) / "state"
+            plist_path = Path(tmpdir) / "LaunchAgents" / "com.example.pr-watch.test.plist"
+            log_dir = Path(tmpdir) / "logs"
+            runner = RecordingLaunchdRunner()
+
+            result = install_launchd_service(
+                state_dir=str(state_dir),
+                interval_seconds=90,
+                notification_mode="in_app",
+                label="com.example.pr-watch.test",
+                python_executable="/opt/pr-watch/bin/python",
+                plist_path=plist_path,
+                log_dir=log_dir,
+                runner=runner,
+            )
+
+            self.assertEqual("installed", result.status)
+            self.assertEqual(plist_path, result.plist_path)
+            self.assertTrue(plist_path.exists())
+            self.assertEqual("90", load_config(str(state_dir))["poll_interval_seconds"])
+            self.assertEqual("in_app", load_config(str(state_dir))["notification_mode"])
+            self.assertEqual(
+                [
+                    ["launchctl", "bootout", result.domain, str(plist_path)],
+                    ["launchctl", "bootstrap", result.domain, str(plist_path)],
+                ],
+                runner.commands,
+            )
+
+    def test_service_run_once_skips_when_worker_lock_is_held(self):
+        from pr_watch.service import run_service_once, single_worker_lock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            store.add_watch_repo("sendbird/ai-agent-js")
+
+            with single_worker_lock(tmpdir) as acquired:
+                self.assertTrue(acquired)
+                result = run_service_once(
+                    state_dir=tmpdir,
+                    current_user_login="irene",
+                    fixture=str(Path("tests/fixtures/prs.json").resolve()),
+                    notification_mode="none",
+                )
+
+            self.assertEqual("locked", result.status)
+            self.assertEqual(0, result.event_count)
+            self.assertEqual([], store.list_events(include_done=True))
+
+    def test_service_run_once_polls_all_watched_repos_with_fixture(self):
+        from pr_watch.service import run_service_once
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "alpha",
+                    "repo": "one",
+                    "number": 1,
+                    "url": "https://github.com/alpha/one/pull/1",
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                      {"author": {"login": "irene"}, "state": "COMMENTED", "submittedAt": "2026-05-11T09:00:00Z"}
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  },
+                  {
+                    "owner": "beta",
+                    "repo": "two",
+                    "number": 2,
+                    "url": "https://github.com/beta/two/pull/2",
+                    "author": {"login": "teammate"},
+                    "latestReviews": [
+                      {"author": {"login": "irene"}, "state": "COMMENTED", "submittedAt": "2026-05-11T09:00:00Z"}
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            store.add_watch_repo("alpha/one")
+            store.add_watch_repo("beta/two")
+
+            result = run_service_once(
+                state_dir=tmpdir,
+                current_user_login="irene",
+                fixture=str(fixture),
+                notification_mode="in_app",
+                sessions=[],
+            )
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual(["alpha/one", "beta/two"], [item.repo for item in result.repo_results])
+            self.assertEqual([1, 1], [item.event_count for item in result.repo_results])
+            self.assertEqual(2, result.event_count)
+            self.assertEqual(
+                ["alpha/one", "beta/two"],
+                sorted(f"{item.repo_owner}/{item.repo_name}" for item in store.list_events(include_done=True)),
+            )
+            self.assertEqual(2, len(store.list_notifications(include_done=True)))
 
     def test_session_discovery_reads_claude_and_codex_indexes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

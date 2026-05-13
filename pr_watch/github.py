@@ -11,6 +11,7 @@ from .classifier import classify_pr
 from .models import InboxItem, SessionInfo
 from .notifications import notify_events
 from .state import StateStore
+from .util import normalize_repo_full_name
 from .workflow import route_event
 
 
@@ -31,6 +32,11 @@ def load_fixture(path: str) -> List[dict]:
     if isinstance(value, list):
         return value
     raise ValueError("fixture must be a list of PR objects or an object with pullRequests")
+
+
+def filter_prs_for_repo(prs: Iterable[dict], repo: str) -> List[dict]:
+    owner, name = normalize_repo_full_name(repo).split("/", 1)
+    return [pr for pr in prs if _pr_repo_full_name(pr) == (owner, name)]
 
 
 def current_user() -> str:
@@ -158,6 +164,19 @@ def _items(value: object) -> List[dict]:
     return []
 
 
+def _pr_repo_full_name(pr: dict) -> tuple[str, str]:
+    owner = str(pr.get("owner") or pr.get("repo_owner") or "").lower()
+    repo = str(pr.get("repo") or pr.get("repo_name") or "").lower()
+    repository = pr.get("repository") or {}
+    if isinstance(repository, dict):
+        if not owner:
+            raw_owner = repository.get("owner") or {}
+            owner = str(raw_owner.get("login") if isinstance(raw_owner, dict) else raw_owner).lower()
+        if not repo:
+            repo = str(repository.get("name") or "").lower()
+    return owner, repo
+
+
 def _int_or_none(value: object) -> Optional[int]:
     try:
         return int(value)
@@ -178,6 +197,8 @@ def poll_once(
 ) -> List[InboxItem]:
     if fixture:
         prs = load_fixture(fixture)
+        if repo:
+            prs = filter_prs_for_repo(prs, repo)
     elif repo:
         prs = fetch_prs(repo)
     else:

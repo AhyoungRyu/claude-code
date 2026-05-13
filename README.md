@@ -33,6 +33,21 @@ pr-watch daemon --once --repo owner/name
 pr-watch inbox
 ```
 
+Watch repositories continuously through a user-level macOS service:
+
+```bash
+pr-watch watch add owner/name
+pr-watch watch list
+pr-watch service install --interval 120 --notification-mode auto --target macos-launchd
+pr-watch service status
+```
+
+The service is a launchd `StartInterval` job, not a resident Python process. It
+wakes up, runs `pr-watch service run-once`, polls the watched repositories,
+updates `~/.pr-watch/state.sqlite`, emits configured notifications, then exits.
+The MCP server and CLI use the same `~/.pr-watch` state, so Codex App,
+Conductor, and terminal sessions see the same inbox and notification history.
+
 Approve an event before it resumes or queues a session:
 
 ```bash
@@ -62,6 +77,11 @@ registered server launches the current Python environment with
 `python -m pr_watch --state-dir ~/.pr-watch mcp`, so app-hosted sessions and
 terminal sessions share the same watcher state. Restart Codex App or start a
 new Conductor/Codex session after installation so the host reloads MCP config.
+
+For the background watcher flow, keep MCP registered and install the service:
+launchd detects PR updates in the background, while MCP remains the approval,
+resume, queue, and in-app notification interface. Background notifications do
+not approve, resume, or queue sessions by themselves.
 
 Advanced registration options:
 
@@ -163,6 +183,8 @@ pr-watch init --profile terminal      # desktop notifications for CLI users
 pr-watch init --profile conductor     # in-app inbox for Conductor hosts
 pr-watch init --profile app           # in-app inbox for app/MCP hosts
 pr-watch daemon --once --repo owner/name --notification-mode desktop
+pr-watch service install --interval 120 --notification-mode in_app
+pr-watch service run-once --notification-mode none
 pr-watch notify <event-id> --mode in_app
 pr-watch notifications
 ```
@@ -189,8 +211,40 @@ pr-watch config set poll_interval_seconds 120
 | `notification_mode` | `auto`, `none`, `desktop`, `in_app`, `both` | `auto` | Notification only; does not resume or queue sessions |
 | `busy_policy` | `run_if_idle_queue_if_busy`, `always_queue`, `notify_only`, `drop_if_busy`, `ask_when_busy` | `run_if_idle_queue_if_busy` | Used when approving delivery |
 | `include_drafts` | `true`, `false` | `false` | Draft PRs are ignored unless enabled |
-| `poll_interval_seconds` | integer seconds | `120` | Used by the long-running daemon |
+| `poll_interval_seconds` | integer seconds | `120` | Used by `service install --interval` and the long-running daemon |
 | `--state-dir` | path | `~/.pr-watch` | Use a separate state/config directory for tests |
+
+### Background Watcher
+
+Manage the repositories that launchd polls:
+
+```bash
+pr-watch watch add owner/name
+pr-watch watch remove owner/name
+pr-watch watch list
+pr-watch watch clear
+```
+
+Manage the macOS user service:
+
+```bash
+pr-watch service install --interval 120 --notification-mode auto --target macos-launchd
+pr-watch service status
+pr-watch service uninstall
+```
+
+`service install` writes a LaunchAgent plist under `~/Library/LaunchAgents/`
+and logs under `~/.pr-watch/logs/`. Each launchd wake-up invokes
+`pr-watch service run-once`, which takes a single-worker lock in the state
+directory. If a previous poll is still active, the overlapping run exits
+cleanly without doing duplicate work.
+
+`service run-once` loads watched repositories from local state and polls them
+sequentially. It preserves the same dedupe, inbox status, notification, and
+approval semantics as `daemon --once`, so manual CLI/MCP polling continues to
+work exactly as before. Notifications are currently sent per event and deduped
+per event/channel; batching is intentionally deferred so the service stays
+small and the existing event-level recovery semantics remain unchanged.
 
 By default, `pr-watch` ignores draft pull requests and only records events for
 PRs that are ready for review. Draft PRs usually do not have meaningful review

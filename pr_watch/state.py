@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .models import Binding, ClassifiedEvent, InboxItem, NotificationItem, QueueItem
-from .util import dumps, loads_dict, random_id, utc_now
+from .util import dumps, loads_dict, normalize_repo_full_name, random_id, utc_now
 
 
 class StateStore:
@@ -97,6 +97,12 @@ class StateStore:
                 );
                 create index if not exists idx_notifications_status
                   on notifications(status);
+
+                create table if not exists watch_repos (
+                  repo_full_name text primary key,
+                  created_at text not null,
+                  updated_at text not null
+                );
                 """
             )
 
@@ -255,6 +261,36 @@ class StateStore:
         with self.connect() as conn:
             rows = conn.execute("select * from bindings order by updated_at desc").fetchall()
         return [_binding_from_row(row) for row in rows]
+
+    def add_watch_repo(self, repo: str) -> str:
+        normalized = normalize_repo_full_name(repo)
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into watch_repos (repo_full_name, created_at, updated_at)
+                values (?, ?, ?)
+                on conflict(repo_full_name) do update set updated_at = excluded.updated_at
+                """,
+                (normalized, now, now),
+            )
+        return normalized
+
+    def remove_watch_repo(self, repo: str) -> bool:
+        normalized = normalize_repo_full_name(repo)
+        with self.connect() as conn:
+            cursor = conn.execute("delete from watch_repos where repo_full_name = ?", (normalized,))
+        return cursor.rowcount > 0
+
+    def list_watch_repos(self) -> List[str]:
+        with self.connect() as conn:
+            rows = conn.execute("select repo_full_name from watch_repos order by repo_full_name").fetchall()
+        return [str(row["repo_full_name"]) for row in rows]
+
+    def clear_watch_repos(self) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute("delete from watch_repos")
+        return cursor.rowcount
 
     def upsert_event(
         self,

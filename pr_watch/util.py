@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 PR_URL_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)"
 )
+REPO_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 def utc_now() -> str:
@@ -52,6 +53,13 @@ def parse_pr_url(value: str) -> Optional[Dict[str, object]]:
         "number": int(match.group("number")),
         "url": match.group(0),
     }
+
+
+def normalize_repo_full_name(value: str) -> str:
+    repo = " ".join(str(value or "").strip().split()).lower()
+    if not REPO_FULL_NAME_RE.match(repo):
+        raise ValueError("repository must be in owner/repo form")
+    return repo
 
 
 def json_text(value: Any) -> str:

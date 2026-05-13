@@ -18,6 +18,13 @@ from .host_integration import (
     resolve_codex_hosts,
 )
 from .notifications import VALID_NOTIFICATION_MODES, notify_event
+from .service import (
+    DEFAULT_LAUNCHD_LABEL,
+    install_launchd_service,
+    run_service_once,
+    service_status,
+    uninstall_launchd_service,
+)
 from .sessions import discover_sessions
 from .state import StateStore
 from .workflow import create_explicit_binding
@@ -29,6 +36,7 @@ INIT_PROFILE_NOTIFICATION_MODES = {
     "app": "in_app",
     "auto": "auto",
 }
+SERVICE_NOTIFICATION_MODES = VALID_NOTIFICATION_MODES - {"browser"}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -128,6 +136,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             store = StateStore(state_db_path(args.state_dir))
             print_notifications(store, include_done=args.all)
             return 0
+        if args.command == "watch":
+            return handle_watch(args)
+        if args.command == "service":
+            return handle_service(args)
         if args.command == "config":
             path = set_config_value(args.key, args.value, args.state_dir)
             print(f"updated {path}")
@@ -248,6 +260,63 @@ def build_parser() -> argparse.ArgumentParser:
     notifications = subparsers.add_parser("notifications", help="show in-app notification inbox and failures")
     notifications.add_argument("--all", action="store_true", help="include sent desktop notifications")
 
+    watch = subparsers.add_parser("watch", help="manage repositories polled by the background service")
+    watch_sub = watch.add_subparsers(dest="watch_command")
+    watch_add = watch_sub.add_parser("add", help="watch a repository")
+    watch_add.add_argument("repo", help="repository as owner/name")
+    watch_remove = watch_sub.add_parser("remove", help="stop watching a repository")
+    watch_remove.add_argument("repo", help="repository as owner/name")
+    watch_sub.add_parser("list", help="list watched repositories")
+    watch_sub.add_parser("clear", help="remove all watched repositories")
+    watch.set_defaults(command="watch")
+
+    service = subparsers.add_parser("service", help="manage the user-level background watcher service")
+    service_sub = service.add_subparsers(dest="service_command")
+    service_install = service_sub.add_parser("install", help="install the macOS launchd one-shot watcher")
+    service_install.add_argument("--interval", type=int, default=120, help="launchd StartInterval in seconds")
+    service_install.add_argument(
+        "--notification-mode",
+        choices=sorted(SERVICE_NOTIFICATION_MODES),
+        default="auto",
+        help="notification mode used by service run-once",
+    )
+    service_install.add_argument("--target", choices=["macos-launchd"], default="macos-launchd")
+    service_install.add_argument("--python", dest="python_executable", default=sys.executable)
+    service_install.add_argument("--label", default=DEFAULT_LAUNCHD_LABEL)
+    service_install.add_argument("--plist-path", help="override LaunchAgent plist path")
+    service_install.add_argument("--log-dir", help="override service log directory")
+    service_install.add_argument("--dry-run", action="store_true", help="print the plist without installing")
+    service_install.add_argument("--fixture", help="fixture path for local testing")
+    service_install.add_argument("--user", help="GitHub login for local testing; defaults to gh api user")
+    service_install.add_argument("--timeout", type=int, help="optional run-once time budget in seconds")
+
+    service_status_parser = service_sub.add_parser("status", help="show launchd service status")
+    service_status_parser.add_argument("--target", choices=["macos-launchd"], default="macos-launchd")
+    service_status_parser.add_argument("--label", default=DEFAULT_LAUNCHD_LABEL)
+    service_status_parser.add_argument("--plist-path", help="override LaunchAgent plist path")
+
+    service_uninstall = service_sub.add_parser("uninstall", help="uninstall the launchd watcher")
+    service_uninstall.add_argument("--target", choices=["macos-launchd"], default="macos-launchd")
+    service_uninstall.add_argument("--label", default=DEFAULT_LAUNCHD_LABEL)
+    service_uninstall.add_argument("--plist-path", help="override LaunchAgent plist path")
+
+    service_run_once = service_sub.add_parser("run-once", help="poll all watched repositories once and exit")
+    service_run_once.add_argument("--fixture", help="JSON fixture for local replay/testing")
+    service_run_once.add_argument("--user", help="current GitHub login; defaults to gh api user")
+    service_run_once.add_argument(
+        "--notification-mode",
+        choices=sorted(VALID_NOTIFICATION_MODES),
+        help="override configured notification mode for this run",
+    )
+    service_run_once.add_argument(
+        "--include-drafts",
+        action="store_true",
+        default=None,
+        help="also watch draft pull requests; default is config include_drafts=false",
+    )
+    service_run_once.add_argument("--timeout", type=int, help="optional time budget in seconds")
+    service.set_defaults(command="service")
+
     init = subparsers.add_parser("init", help="initialize pr-watch defaults for a host profile")
     init.add_argument("--profile", choices=sorted(INIT_PROFILE_NOTIFICATION_MODES), default="auto")
 
@@ -306,6 +375,108 @@ def print_notifications(store: StateStore, include_done: bool = False) -> None:
         print(f"{item.notification_id}\t{item.status}\t{item.channel}\t{item.event_id}\t{item.title}")
         if item.error:
             print("  error:", item.error)
+
+
+def handle_watch(args: argparse.Namespace) -> int:
+    store = StateStore(state_db_path(args.state_dir))
+    if args.watch_command == "add":
+        repo = store.add_watch_repo(args.repo)
+        print(f"watching {repo}")
+        return 0
+    if args.watch_command == "remove":
+        repo = args.repo
+        removed = store.remove_watch_repo(repo)
+        print(f"removed {repo.lower()}" if removed else f"not watching {repo.lower()}")
+        return 0 if removed else 1
+    if args.watch_command == "list":
+        repos = store.list_watch_repos()
+        if not repos:
+            print("No watched repositories.")
+            return 0
+        for repo in repos:
+            print(repo)
+        return 0
+    if args.watch_command == "clear":
+        count = store.clear_watch_repos()
+        print(f"cleared {count} watched repository/repositories")
+        return 0
+    return 2
+
+
+def handle_service(args: argparse.Namespace) -> int:
+    if args.service_command == "install":
+        result = install_launchd_service(
+            state_dir=args.state_dir,
+            interval_seconds=args.interval,
+            notification_mode=args.notification_mode,
+            target=args.target,
+            label=args.label,
+            python_executable=args.python_executable,
+            plist_path=Path(args.plist_path) if args.plist_path else None,
+            log_dir=Path(args.log_dir) if args.log_dir else None,
+            dry_run=args.dry_run,
+            fixture=args.fixture,
+            user=args.user,
+            timeout_seconds=args.timeout,
+        )
+        print(f"{result.status}: {result.label}")
+        print(f"domain: {result.domain}")
+        print(f"plist: {result.plist_path}")
+        if result.message:
+            print(result.message)
+        if args.dry_run:
+            print(result.plist, end="")
+        return 0 if result.status in {"installed", "dry_run"} else 1
+    if args.service_command == "status":
+        result = service_status(
+            target=args.target,
+            label=args.label,
+            plist_path=Path(args.plist_path) if args.plist_path else None,
+        )
+        print(f"label: {result.label}")
+        print(f"domain: {result.domain}")
+        print(f"plist: {result.plist_path}")
+        print(f"plist_exists: {str(result.plist_exists).lower()}")
+        print(f"loaded: {str(result.loaded).lower()}")
+        if result.message:
+            print(result.message)
+        return 0
+    if args.service_command == "uninstall":
+        result = uninstall_launchd_service(
+            target=args.target,
+            label=args.label,
+            plist_path=Path(args.plist_path) if args.plist_path else None,
+        )
+        print(f"{result.status}: {result.label}")
+        print(f"plist: {result.plist_path}")
+        if result.message:
+            print(result.message)
+        return 0 if result.status == "uninstalled" else 1
+    if args.service_command == "run-once":
+        config = load_config(args.state_dir)
+        include_drafts = (
+            args.include_drafts
+            if args.include_drafts is not None
+            else config_bool(config, "include_drafts", default=False)
+        )
+        result = run_service_once(
+            state_dir=args.state_dir,
+            current_user_login=args.user,
+            fixture=args.fixture,
+            notification_mode=args.notification_mode,
+            include_drafts=include_drafts,
+            timeout_seconds=args.timeout,
+        )
+        print(f"{result.status}: recorded {result.event_count} actionable event(s)")
+        if result.message:
+            print(result.message)
+        for repo_result in result.repo_results:
+            line = f"{repo_result.repo}\t{repo_result.status}\t{repo_result.event_count}"
+            if repo_result.message:
+                line += f"\t{repo_result.message}"
+            print(line)
+        return 0 if result.status in {"completed", "locked"} else 1
+    return 2
 
 
 def current_branch() -> str:
