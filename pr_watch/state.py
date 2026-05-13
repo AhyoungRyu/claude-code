@@ -498,6 +498,54 @@ class StateStore:
             )
         return self.get_event(event_id)
 
+    def dismiss_stale_open_pr_events(self, repo: str, open_pr_numbers: Iterable[int]) -> int:
+        normalized = normalize_repo_full_name(repo)
+        repo_owner, repo_name = normalized.split("/", 1)
+        live_numbers = sorted({int(number) for number in open_pr_numbers})
+        params: List[Any] = [repo_owner, repo_name]
+        query = """
+            select event_id from events
+            where lower(repo_owner) = ? and lower(repo_name) = ?
+              and status in ('pending', 'needs_confirmation', 'queued')
+        """
+        if live_numbers:
+            placeholders = ", ".join("?" for _ in live_numbers)
+            query += f" and pr_number not in ({placeholders})"
+            params.extend(live_numbers)
+
+        now = utc_now()
+        error = (
+            f"PR is no longer in the open PR list for {normalized}; "
+            "it may have been merged or closed."
+        )
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            if not rows:
+                return 0
+            event_ids = [row["event_id"] for row in rows]
+            conn.executemany(
+                """
+                update events set
+                  status = 'dismissed',
+                  delivery_status = 'stale_pr_not_open',
+                  recovery_command = '',
+                  error = ?,
+                  updated_at = ?
+                where event_id = ?
+                """,
+                [(error, now, event_id) for event_id in event_ids],
+            )
+            conn.executemany(
+                """
+                update queue set
+                  status = 'stale_pr_not_open',
+                  updated_at = ?
+                where event_id = ? and status = 'queued'
+                """,
+                [(now, event_id) for event_id in event_ids],
+            )
+        return len(rows)
+
     def enqueue(self, event_id: str, command: List[str], prompt: str) -> QueueItem:
         now = utc_now()
         queue_id = random_id("queue")

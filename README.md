@@ -92,7 +92,9 @@ remote, adds it to the explicit watch allowlist, and installs or updates the
 launchd service only when `--install-service` is present. launchd detects PR
 updates in the background, while MCP remains the approval, resume, queue, and
 in-app notification interface. Background notifications do not approve, resume,
-or queue sessions by themselves.
+or queue sessions by themselves. Each repository poll also reconciles the live
+open PR list and dismisses stale pending inbox items for PRs that have been
+merged, closed, or otherwise disappeared from that repo's open PRs.
 
 ### Host Bridge
 

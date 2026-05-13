@@ -86,7 +86,7 @@ def _author_events(
             payload={"failed_checks": failed_checks},
         )
 
-    if str(pr_data.get("mergeStateStatus") or "").upper() in {"DIRTY", "BLOCKED"}:
+    if _has_merge_conflict(pr_data):
         yield _event(
             pr,
             role="author",
@@ -94,7 +94,10 @@ def _author_events(
             actor="github",
             occurred_at=updated_at,
             summary=f"PR #{pr.number} has a merge conflict.",
-            payload={"mergeStateStatus": pr_data.get("mergeStateStatus")},
+            payload={
+                "mergeStateStatus": pr_data.get("mergeStateStatus"),
+                "mergeable": pr_data.get("mergeable"),
+            },
         )
 
     for comment in _items(pr_data.get("comments")):
@@ -198,6 +201,12 @@ def _linked_issue_events(
                 summary=summary,
                 payload=payload,
             )
+
+
+def _has_merge_conflict(pr_data: Dict[str, Any]) -> bool:
+    merge_state = str(pr_data.get("mergeStateStatus") or "").upper()
+    mergeable = str(pr_data.get("mergeable") or "").upper()
+    return merge_state == "DIRTY" or mergeable == "CONFLICTING"
 
 
 def _current_user_role(pr_data: Dict[str, Any], current_user: str, author: str) -> str:

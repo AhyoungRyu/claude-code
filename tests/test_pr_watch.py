@@ -54,9 +54,30 @@ def make_review_event(dedupe_suffix="main"):
     )
 
 
+def make_inbox_event(owner, repo, number, dedupe_suffix, role="reviewer"):
+    return ClassifiedEvent(
+        pr=PullRequestRef(
+            owner=owner,
+            repo=repo,
+            number=number,
+            url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            title=f"PR {number}",
+            head_ref=f"pr-{number}",
+        ),
+        role=role,
+        event_type="author_push_after_review",
+        summary=f"PR #{number} needs attention",
+        actor="teammate",
+        actionable=True,
+        dedupe_key=f"test:{owner}/{repo}:{number}:{dedupe_suffix}",
+        payload={"lastPushedAt": "2026-05-11T10:00:00Z"},
+    )
+
+
 class PrWatchTests(unittest.TestCase):
     def test_github_polling_requests_pr_comments(self):
         self.assertIn("comments", GH_PR_FIELDS.split(","))
+        self.assertIn("mergeable", GH_PR_FIELDS.split(","))
 
     def test_github_polling_requests_draft_status(self):
         self.assertIn("isDraft", GH_PR_FIELDS.split(","))
@@ -307,6 +328,57 @@ class PrWatchTests(unittest.TestCase):
             [event.dedupe_key for event in first],
             [event.dedupe_key for event in second],
         )
+
+    def test_blocked_merge_state_with_mergeable_pr_is_not_a_merge_conflict(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1058,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                "author": {"login": "irene"},
+                "mergeStateStatus": "BLOCKED",
+                "mergeable": "MERGEABLE",
+                "updatedAt": "2026-05-12T10:00:00Z",
+            },
+            current_user="irene",
+        )
+
+        self.assertNotIn("merge_conflict", {event.event_type for event in events})
+
+    def test_dirty_merge_state_emits_merge_conflict(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1058,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                "author": {"login": "irene"},
+                "mergeStateStatus": "DIRTY",
+                "mergeable": "MERGEABLE",
+                "updatedAt": "2026-05-12T10:00:00Z",
+            },
+            current_user="irene",
+        )
+
+        self.assertIn("merge_conflict", {event.event_type for event in events})
+
+    def test_conflicting_mergeable_state_emits_merge_conflict(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1058,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                "author": {"login": "irene"},
+                "mergeStateStatus": "UNKNOWN",
+                "mergeable": "CONFLICTING",
+                "updatedAt": "2026-05-12T10:00:00Z",
+            },
+            current_user="irene",
+        )
+
+        self.assertIn("merge_conflict", {event.event_type for event in events})
 
     def test_linked_github_issue_comment_becomes_actionable_pr_event(self):
         events = classify_pr(
@@ -1213,6 +1285,110 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(1, len(notifier.messages))
             self.assertEqual([], store.list_queue())
             self.assertEqual("awaiting_approval", store.get_event(items[0].event_id).delivery_status)
+
+    def test_poll_once_dismisses_stale_open_pr_events_for_polled_repo_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "author": {"login": "teammate"},
+                    "updatedAt": "2026-05-12T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            stale_pending = store.upsert_event(
+                make_inbox_event("sendbird", "ai-agent-js", 1055, "pending"),
+                status="pending",
+                delivery_status="awaiting_approval",
+                binding_id=None,
+                confidence="high",
+                evidence=["pending stale event"],
+            )
+            stale_confirmation = store.upsert_event(
+                make_inbox_event("sendbird", "ai-agent-js", 1056, "confirmation"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=None,
+                confidence="high",
+                evidence=["confirmation stale event"],
+            )
+            stale_inbox_only = store.upsert_event(
+                make_inbox_event("sendbird", "ai-agent-js", 1057, "inbox-only"),
+                status="pending",
+                delivery_status="inbox_only",
+                binding_id=None,
+                confidence="low",
+                evidence=["inbox only stale event"],
+            )
+            stale_queued = store.upsert_event(
+                make_inbox_event("sendbird", "ai-agent-js", 1058, "queued"),
+                status="queued",
+                delivery_status="queued",
+                binding_id=None,
+                confidence="high",
+                evidence=["queued stale event"],
+            )
+            store.enqueue(stale_queued.event_id, ["codex", "resume", "session", "prompt"], "prompt")
+            done_same_repo = store.upsert_event(
+                make_inbox_event("sendbird", "ai-agent-js", 1059, "done"),
+                status="delivered",
+                delivery_status="delivered",
+                binding_id=None,
+                confidence="high",
+                evidence=["already delivered"],
+            )
+            unrelated_repo = store.upsert_event(
+                make_inbox_event("other", "repo", 1055, "pending"),
+                status="pending",
+                delivery_status="awaiting_approval",
+                binding_id=None,
+                confidence="high",
+                evidence=["unrelated repo"],
+            )
+
+            poll_once(store, "irene", repo="sendbird/ai-agent-js", fixture=str(fixture), sessions=[])
+
+            for item in (stale_pending, stale_confirmation, stale_inbox_only, stale_queued):
+                stored = store.get_event(item.event_id)
+                self.assertEqual("dismissed", stored.status)
+                self.assertEqual("stale_pr_not_open", stored.delivery_status)
+                self.assertIn("no longer in the open PR list", stored.error)
+            self.assertEqual([], store.list_queue())
+            self.assertEqual("delivered", store.get_event(done_same_repo.event_id).status)
+            self.assertEqual("delivered", store.get_event(done_same_repo.event_id).delivery_status)
+            self.assertEqual("pending", store.get_event(unrelated_repo.event_id).status)
+            self.assertEqual("awaiting_approval", store.get_event(unrelated_repo.event_id).delivery_status)
+
+    def test_poll_once_dismisses_stale_open_pr_events_for_mixed_case_repo_owner(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text("[]", encoding="utf-8")
+            store = make_store(tmpdir)
+            stale_queued = store.upsert_event(
+                make_inbox_event("AhyoungRyu", "claude-code", 5, "queued"),
+                status="queued",
+                delivery_status="queued",
+                binding_id=None,
+                confidence="high",
+                evidence=["queued stale event"],
+            )
+            store.enqueue(stale_queued.event_id, ["codex", "resume", "session", "prompt"], "prompt")
+
+            poll_once(store, "AhyoungRyu", repo="AhyoungRyu/claude-code", fixture=str(fixture), sessions=[])
+
+            stored = store.get_event(stale_queued.event_id)
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("stale_pr_not_open", stored.delivery_status)
+            self.assertEqual([], store.list_queue())
 
     def test_idle_resume_failure_preserves_inbox_item_with_recovery_command(self):
         with tempfile.TemporaryDirectory() as tmpdir:

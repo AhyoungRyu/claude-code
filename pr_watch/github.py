@@ -17,7 +17,7 @@ from .workflow import route_event
 
 GH_PR_FIELDS = (
     "number,url,title,author,body,headRefName,updatedAt,isDraft,reviewDecision,"
-    "mergeStateStatus,statusCheckRollup,latestReviews,comments,reviewRequests"
+    "mergeStateStatus,mergeable,statusCheckRollup,latestReviews,comments,reviewRequests"
     ",closingIssuesReferences,commits"
 )
 
@@ -204,6 +204,11 @@ def poll_once(
     else:
         raise ValueError("poll_once requires --repo or --fixture")
 
+    reconcile_repo = normalize_repo_full_name(repo) if repo else _infer_repo_from_prs(prs)
+    if reconcile_repo:
+        open_numbers = [number for number in (_int_or_none(pr.get("number")) for pr in prs) if number is not None]
+        store.dismiss_stale_open_pr_events(reconcile_repo, open_numbers)
+
     session_list = list(sessions or [])
     routed: List[InboxItem] = []
     for pr in prs:
@@ -238,3 +243,14 @@ def daemon_loop(
             notification_host=notification_host,
         )
         time.sleep(interval_seconds)
+
+
+def _infer_repo_from_prs(prs: Iterable[dict]) -> Optional[str]:
+    repos = {
+        f"{owner}/{name}"
+        for owner, name in (_pr_repo_full_name(pr) for pr in prs)
+        if owner and name
+    }
+    if len(repos) == 1:
+        return next(iter(repos))
+    return None
