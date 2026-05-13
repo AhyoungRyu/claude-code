@@ -131,15 +131,6 @@ def _sync_conductor(
             assert binding is not None
             existing = store.get_host_sync(event.event_id, "conductor_confirmation", binding.session_id)
             if existing:
-                results.append(
-                    HostEventResult(
-                        host="conductor",
-                        event_id=event.event_id,
-                        action="confirmation_already_requested",
-                        target_id=binding.session_id,
-                        message="binding confirmation request already synced to this host target",
-                    )
-                )
                 continue
             mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
             if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
