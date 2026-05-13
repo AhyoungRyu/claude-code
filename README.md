@@ -94,6 +94,67 @@ updates in the background, while MCP remains the approval, resume, queue, and
 in-app notification interface. Background notifications do not approve, resume,
 or queue sessions by themselves.
 
+### Host Bridge
+
+The host bridge is an opt-in local adapter layer for surfacing already-recorded
+pending events in desktop/app hosts. It does not patch app binaries and does not
+connect to Conductor sidecar sockets.
+
+Check host support:
+
+```bash
+pr-watch host status
+pr-watch host status --conductor-db "$HOME/Library/Application Support/com.conductor.app/conductor.db"
+```
+
+Sync pending events once:
+
+```bash
+pr-watch host sync-once --host conductor
+pr-watch host sync-once --host conductor --trigger-confirmed
+```
+
+The same bridge is exposed through MCP as `host_status` and `sync_host_once`
+for hosts that can explicitly call MCP tools. These tools still do not make the
+host app subscribe to PR Watch automatically; they provide the bridge action
+when the host or agent chooses to call it.
+
+Host surfaces are intentionally different:
+
+| Surface | What it does | What it does not do |
+|---------|--------------|---------------------|
+| Desktop notification | Sends a local macOS notification when polling or `notify` runs | Does not approve, resume, queue, or update app unread state |
+| In-app MCP inbox | Stores durable `in_app` notifications readable through MCP tools | Does not make Codex App show an automatic badge or popup by itself |
+| Conductor mirror | Experimental/private-surface SQLite adapter that inserts an assistant-role synthetic PR Watch message into the matched Conductor session and marks its session/workspace unread | Does not send user input, execute the session, or use Conductor's sidecar socket |
+| Confirmed-binding auto-trigger | With `--trigger-confirmed`, approves/queues/resumes only confirmed, high-confidence bindings | Does not auto-confirm first inferred bindings; ambiguous or low-confidence events stay pending |
+
+Codex App support is currently diagnostic only for push-style UI. MCP
+registration lets Codex App call the PR Watch inbox tools, but there is no known
+stable local Codex App API for automatic app badges, popups, or session pushes.
+
+The Conductor mirror is marked experimental because it writes to Conductor's
+private local SQLite schema. Use `host status` first. Mirroring is deduped per
+event/host target in PR Watch state and also embeds `pr-watch:event_id=...` in
+the synthetic assistant message so repeated runs do not spam the session.
+
+To make host sync automatic, reuse the existing launchd one-shot watcher and add
+`--host-sync`:
+
+```bash
+pr-watch setup --current-repo --install-service --host-sync --host conductor
+pr-watch service install --interval 120 --notification-mode in_app --host-sync --host conductor
+```
+
+Add `--trigger-confirmed` only when you want confirmed bindings to be queued or
+resumed automatically. The default session state is `unknown`, so confirmed
+events queue by default from the service path. The service installer does not
+pretend to detect whether a host session is idle. For an explicit manual run
+that may invoke `claude --resume` or `codex resume`, use:
+
+```bash
+pr-watch host sync-once --trigger-confirmed --session-state idle
+```
+
 Advanced registration options:
 
 ```bash

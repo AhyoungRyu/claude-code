@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .models import Binding, ClassifiedEvent, InboxItem, NotificationItem, QueueItem
+from .models import Binding, ClassifiedEvent, HostSyncItem, InboxItem, NotificationItem, QueueItem
 from .util import dumps, loads_dict, normalize_repo_full_name, random_id, utc_now
 
 
@@ -97,6 +97,21 @@ class StateStore:
                 );
                 create index if not exists idx_notifications_status
                   on notifications(status);
+
+                create table if not exists host_syncs (
+                  sync_id text primary key,
+                  event_id text not null,
+                  host text not null,
+                  target_id text not null,
+                  status text not null,
+                  external_id text not null default '',
+                  error text not null default '',
+                  created_at text not null,
+                  updated_at text not null,
+                  unique(event_id, host, target_id)
+                );
+                create index if not exists idx_host_syncs_event
+                  on host_syncs(event_id);
 
                 create table if not exists watch_repos (
                   repo_full_name text primary key,
@@ -532,6 +547,60 @@ class StateStore:
             )
         return self.get_notification_by_id(notification_id)
 
+    def get_host_sync(self, event_id: str, host: str, target_id: str) -> Optional[HostSyncItem]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select * from host_syncs
+                where event_id = ? and host = ? and target_id = ?
+                """,
+                (event_id, host, target_id),
+            ).fetchone()
+        return _host_sync_from_row(row) if row else None
+
+    def upsert_host_sync(
+        self,
+        event_id: str,
+        host: str,
+        target_id: str,
+        status: str,
+        external_id: str = "",
+        error: str = "",
+    ) -> HostSyncItem:
+        now = utc_now()
+        existing = self.get_host_sync(event_id, host, target_id)
+        sync_id = existing.sync_id if existing else random_id("sync")
+        created_at = existing.created_at if existing else now
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into host_syncs (
+                  sync_id, event_id, host, target_id, status, external_id,
+                  error, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(event_id, host, target_id) do update set
+                  status=excluded.status,
+                  external_id=excluded.external_id,
+                  error=excluded.error,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    sync_id,
+                    event_id,
+                    host,
+                    target_id,
+                    status,
+                    external_id,
+                    error,
+                    created_at,
+                    now,
+                ),
+            )
+        synced = self.get_host_sync(event_id, host, target_id)
+        if synced is None:  # pragma: no cover - sqlite insert failure would raise first
+            raise RuntimeError("host sync was not recorded")
+        return synced
+
 
 def _binding_from_row(row: sqlite3.Row) -> Binding:
     return Binding(
@@ -616,6 +685,20 @@ def _notification_from_row(row: sqlite3.Row) -> NotificationItem:
         message=row["message"],
         target_url=row["target_url"],
         status=row["status"],
+        error=row["error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _host_sync_from_row(row: sqlite3.Row) -> HostSyncItem:
+    return HostSyncItem(
+        sync_id=row["sync_id"],
+        event_id=row["event_id"],
+        host=row["host"],
+        target_id=row["target_id"],
+        status=row["status"],
+        external_id=row["external_id"],
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],

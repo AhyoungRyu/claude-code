@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 from .config import config_bool, load_config, state_db_path
 from .delivery import approve_event
 from .github import current_user, poll_once as github_poll_once
+from .host_adapter import status as host_bridge_status
+from .host_adapter import sync_once as host_bridge_sync_once
 from .notifications import notify_event, resolve_notification_mode
 from .sessions import discover_sessions
 from .state import StateStore
@@ -208,6 +210,34 @@ def check_pr_updates(
     )
 
 
+def host_status(conductor_db_path: Optional[str] = None) -> Dict[str, Any]:
+    """Report host bridge support for Conductor and Codex App."""
+    return _to_json(host_bridge_status(conductor_db_path=conductor_db_path))
+
+
+def sync_host_once(
+    host: str = "all",
+    conductor_db_path: Optional[str] = None,
+    trigger_confirmed: bool = False,
+    session_state: str = "unknown",
+    busy_policy: Optional[str] = None,
+    state_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Mirror pending events to local host surfaces and optionally trigger confirmed bindings."""
+    state_dir = _effective_state_dir(state_dir)
+    config = load_config(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = host_bridge_sync_once(
+        store,
+        hosts=[host],
+        conductor_db_path=conductor_db_path,
+        trigger_confirmed=trigger_confirmed,
+        session_state=session_state,
+        busy_policy=busy_policy or config.get("busy_policy", "run_if_idle_queue_if_busy"),
+    )
+    return _to_json(result)
+
+
 def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
     """Return local dependency and configuration diagnostics."""
     state_dir = _effective_state_dir(state_dir)
@@ -244,6 +274,8 @@ def build_server() -> Any:
     server.tool()(list_notifications)
     server.tool()(show_in_app_notifications)
     server.tool()(ack_notification)
+    server.tool()(host_status)
+    server.tool()(sync_host_once)
     server.tool()(doctor)
     return server
 

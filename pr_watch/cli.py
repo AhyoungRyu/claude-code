@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import config_bool, load_config, set_config_value, state_db_path
-from .delivery import approve_event
+from .delivery import DEFAULT_BUSY_POLICY, approve_event
 from .github import current_user, daemon_loop, poll_once
 from .host_integration import (
     build_codex_mcp_add_command,
@@ -17,6 +17,8 @@ from .host_integration import (
     install_mcp_hosts,
     resolve_codex_hosts,
 )
+from .host_adapter import status as host_status
+from .host_adapter import sync_once as host_sync_once
 from .notifications import VALID_NOTIFICATION_MODES, notify_event
 from .service import (
     DEFAULT_LAUNCHD_LABEL,
@@ -144,6 +146,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return handle_setup(args)
         if args.command == "service":
             return handle_service(args)
+        if args.command == "host":
+            return handle_host(args)
         if args.command == "config":
             path = set_config_value(args.key, args.value, args.state_dir)
             print(f"updated {path}")
@@ -296,6 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--fixture", help="fixture path for local testing")
     setup.add_argument("--user", help="GitHub login for local testing; defaults to gh api user")
     setup.add_argument("--timeout", type=int, help="optional run-once time budget in seconds")
+    setup.add_argument("--host-sync", action="store_true", help="run host sync after each service poll")
+    setup.add_argument("--host", choices=["all", "conductor", "codex-app"], default="all")
+    setup.add_argument("--conductor-db", help="override Conductor SQLite DB path for host sync")
+    setup.add_argument(
+        "--trigger-confirmed",
+        action="store_true",
+        help="auto-trigger only confirmed high-confidence bindings during host sync",
+    )
     setup.set_defaults(command="setup")
 
     service = subparsers.add_parser("service", help="manage the user-level background watcher service")
@@ -317,6 +329,14 @@ def build_parser() -> argparse.ArgumentParser:
     service_install.add_argument("--fixture", help="fixture path for local testing")
     service_install.add_argument("--user", help="GitHub login for local testing; defaults to gh api user")
     service_install.add_argument("--timeout", type=int, help="optional run-once time budget in seconds")
+    service_install.add_argument("--host-sync", action="store_true", help="run host sync after each service poll")
+    service_install.add_argument("--host", choices=["all", "conductor", "codex-app"], default="all")
+    service_install.add_argument("--conductor-db", help="override Conductor SQLite DB path for host sync")
+    service_install.add_argument(
+        "--trigger-confirmed",
+        action="store_true",
+        help="auto-trigger only confirmed high-confidence bindings during host sync",
+    )
 
     service_status_parser = service_sub.add_parser("status", help="show launchd service status")
     service_status_parser.add_argument("--target", choices=["macos-launchd"], default="macos-launchd")
@@ -343,7 +363,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="also watch draft pull requests; default is config include_drafts=false",
     )
     service_run_once.add_argument("--timeout", type=int, help="optional time budget in seconds")
+    service_run_once.add_argument("--host-sync", action="store_true", help="run host sync after polling")
+    service_run_once.add_argument("--host", choices=["all", "conductor", "codex-app"], default="all")
+    service_run_once.add_argument("--conductor-db", help="override Conductor SQLite DB path for host sync")
+    service_run_once.add_argument(
+        "--trigger-confirmed",
+        action="store_true",
+        help="auto-trigger only confirmed high-confidence bindings during host sync",
+    )
     service.set_defaults(command="service")
+
+    host = subparsers.add_parser("host", help="sync pending events into local host surfaces")
+    host_sub = host.add_subparsers(dest="host_command")
+    host_status_parser = host_sub.add_parser("status", help="show host bridge support and diagnostics")
+    host_status_parser.add_argument("--conductor-db", help="override Conductor SQLite DB path")
+    host_sync = host_sub.add_parser("sync-once", help="mirror pending events to host surfaces once")
+    host_sync.add_argument("--host", choices=["all", "conductor", "codex-app"], default="all")
+    host_sync.add_argument("--conductor-db", help="override Conductor SQLite DB path")
+    host_sync.add_argument(
+        "--trigger-confirmed",
+        action="store_true",
+        help="approve/queue/resume only confirmed high-confidence bindings",
+    )
+    host_sync.add_argument("--session-state", choices=["idle", "working", "unknown"], default="unknown")
+    host_sync.add_argument(
+        "--busy-policy",
+        choices=["run_if_idle_queue_if_busy", "always_queue", "notify_only", "drop_if_busy", "ask_when_busy"],
+    )
+    host.set_defaults(command="host")
 
     init = subparsers.add_parser("init", help="initialize pr-watch defaults for a host profile")
     init.add_argument("--profile", choices=sorted(INIT_PROFILE_NOTIFICATION_MODES), default="auto")
@@ -431,6 +478,47 @@ def handle_watch(args: argparse.Namespace) -> int:
     return 2
 
 
+def handle_host(args: argparse.Namespace) -> int:
+    if args.host_command == "status":
+        result = host_status(conductor_db_path=args.conductor_db)
+        print(f"conductor: {result.conductor.status}")
+        print(f"conductor_db: {result.conductor.db_path}")
+        if result.conductor.message:
+            print(f"conductor_message: {result.conductor.message}")
+        print(f"codex-app: {result.codex_app.status}")
+        print(f"codex_app_message: {result.codex_app.message}")
+        return 0
+    if args.host_command == "sync-once":
+        store = StateStore(state_db_path(args.state_dir))
+        result = host_sync_once(
+            store,
+            hosts=[args.host],
+            conductor_db_path=args.conductor_db,
+            trigger_confirmed=args.trigger_confirmed,
+            session_state=args.session_state,
+            busy_policy=args.busy_policy or DEFAULT_BUSY_POLICY,
+        )
+        if args.host in {"all", "codex-app"}:
+            print(f"codex-app: {result.codex_app.status}")
+            print(f"codex_app_message: {result.codex_app.message}")
+        for item in result.host_results:
+            target = f"\ttarget={item.target_id}" if item.target_id else ""
+            event = item.event_id or "-"
+            print(f"{item.host}\t{event}\t{item.action}{target}")
+            if item.message:
+                print(f"  {item.message}")
+        for item in result.trigger_results:
+            print(f"trigger\t{item.event_id}\t{item.action}")
+            if item.message:
+                print(f"  {item.message}")
+        if not result.host_results and not result.trigger_results:
+            print("No eligible pending host events.")
+        failed = any(item.action in {"failed", "missing", "schema_mismatch", "unavailable"} for item in result.host_results)
+        return 1 if failed else 0
+    print("pr-watch host: choose status or sync-once", file=sys.stderr)
+    return 2
+
+
 def handle_setup(args: argparse.Namespace) -> int:
     repo = _setup_repo(args)
     install_service = args.install_service
@@ -466,6 +554,10 @@ def handle_setup(args: argparse.Namespace) -> int:
         fixture=args.fixture,
         user=args.user,
         timeout_seconds=args.timeout,
+        host_sync=args.host_sync,
+        host=args.host,
+        conductor_db_path=args.conductor_db,
+        trigger_confirmed=args.trigger_confirmed,
     )
     print(f"{result.status}: {result.label}")
     print(f"domain: {result.domain}")
@@ -519,6 +611,10 @@ def handle_service(args: argparse.Namespace) -> int:
             fixture=args.fixture,
             user=args.user,
             timeout_seconds=args.timeout,
+            host_sync=args.host_sync,
+            host=args.host,
+            conductor_db_path=args.conductor_db,
+            trigger_confirmed=args.trigger_confirmed,
         )
         print(f"{result.status}: {result.label}")
         print(f"domain: {result.domain}")
@@ -567,6 +663,10 @@ def handle_service(args: argparse.Namespace) -> int:
             notification_mode=args.notification_mode,
             include_drafts=include_drafts,
             timeout_seconds=args.timeout,
+            host_sync=args.host_sync,
+            host=args.host,
+            conductor_db_path=args.conductor_db,
+            trigger_confirmed=args.trigger_confirmed,
         )
         print(f"{result.status}: recorded {result.event_count} actionable event(s)")
         if result.message:

@@ -12,6 +12,7 @@ from typing import Iterable, List, Optional
 
 from .config import config_bool, default_state_dir, load_config, set_config_value, state_db_path
 from .github import current_user, poll_once
+from .host_adapter import sync_once as host_sync_once
 from .models import SessionInfo
 from .notifications import normalize_notification_mode
 from .sessions import discover_sessions
@@ -96,6 +97,10 @@ def build_launchd_plist(
     notification_mode: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
     working_directory: Optional[str] = None,
+    host_sync: bool = False,
+    host: str = "all",
+    conductor_db_path: Optional[str] = None,
+    trigger_confirmed: bool = False,
 ) -> str:
     program_arguments = [
         python_executable,
@@ -114,6 +119,13 @@ def build_launchd_plist(
         program_arguments.extend(["--notification-mode", normalize_notification_mode(notification_mode)])
     if timeout_seconds is not None:
         program_arguments.extend(["--timeout", str(timeout_seconds)])
+    if host_sync:
+        program_arguments.append("--host-sync")
+        program_arguments.extend(["--host", host])
+        if conductor_db_path:
+            program_arguments.extend(["--conductor-db", str(Path(conductor_db_path).expanduser())])
+        if trigger_confirmed:
+            program_arguments.append("--trigger-confirmed")
 
     payload = {
         "Label": label,
@@ -142,6 +154,10 @@ def install_launchd_service(
     fixture: Optional[str] = None,
     user: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
+    host_sync: bool = False,
+    host: str = "all",
+    conductor_db_path: Optional[str] = None,
+    trigger_confirmed: bool = False,
 ) -> ServiceInstallResult:
     _validate_target(target)
     if interval_seconds < 1:
@@ -165,6 +181,10 @@ def install_launchd_service(
         notification_mode=mode,
         timeout_seconds=timeout_seconds,
         working_directory=str(_package_root()),
+        host_sync=host_sync,
+        host=host,
+        conductor_db_path=conductor_db_path,
+        trigger_confirmed=trigger_confirmed,
     )
 
     if dry_run:
@@ -227,6 +247,10 @@ def run_service_once(
     timeout_seconds: Optional[int] = None,
     sessions: Optional[Iterable[SessionInfo]] = None,
     notification_host: Optional[str] = None,
+    host_sync: bool = False,
+    host: str = "all",
+    conductor_db_path: Optional[str | Path] = None,
+    trigger_confirmed: bool = False,
 ) -> ServiceRunResult:
     state_path = _state_dir_path(state_dir)
     with single_worker_lock(state_path) as acquired:
@@ -241,6 +265,10 @@ def run_service_once(
             timeout_seconds=timeout_seconds,
             sessions=sessions,
             notification_host=notification_host,
+            host_sync=host_sync,
+            host=host,
+            conductor_db_path=conductor_db_path,
+            trigger_confirmed=trigger_confirmed,
         )
 
 
@@ -253,6 +281,10 @@ def _run_service_once_locked(
     timeout_seconds: Optional[int],
     sessions: Optional[Iterable[SessionInfo]],
     notification_host: Optional[str],
+    host_sync: bool,
+    host: str,
+    conductor_db_path: Optional[str | Path],
+    trigger_confirmed: bool,
 ) -> ServiceRunResult:
     store = StateStore(state_db_path(str(state_path)))
     repos = store.list_watch_repos()
@@ -291,13 +323,43 @@ def _run_service_once_locked(
         event_count += len(items)
         repo_results.append(RepoRunResult(repo, "completed", event_count=len(items)))
 
+    host_message = ""
+    host_failed = False
+    if host_sync:
+        sync_result = host_sync_once(
+            store,
+            hosts=[host],
+            conductor_db_path=conductor_db_path,
+            trigger_confirmed=trigger_confirmed,
+        )
+        host_failed = any(
+            item.action in {"failed", "missing", "schema_mismatch", "unavailable"}
+            for item in sync_result.host_results
+        )
+        host_message = _host_sync_message(sync_result.host_results, len(sync_result.trigger_results))
+
     if any(item.status == "failed" for item in repo_results):
         status = "completed_with_errors"
     elif any(item.status == "timed_out" for item in repo_results):
         status = "timed_out"
+    elif host_failed:
+        status = "completed_with_errors"
     else:
         status = "completed"
-    return ServiceRunResult(status, event_count=event_count, repo_results=repo_results)
+    return ServiceRunResult(status, event_count=event_count, repo_results=repo_results, message=host_message)
+
+
+def _host_sync_message(host_results: list[object], trigger_count: int) -> str:
+    if not host_results and not trigger_count:
+        return "host sync: no eligible pending host events"
+    mirrored = sum(1 for item in host_results if getattr(item, "action", "") == "mirrored")
+    already = sum(1 for item in host_results if getattr(item, "action", "") == "already_synced")
+    failed = sum(
+        1
+        for item in host_results
+        if getattr(item, "action", "") in {"failed", "missing", "schema_mismatch", "unavailable"}
+    )
+    return f"host sync: mirrored={mirrored} already_synced={already} failed={failed} triggered={trigger_count}"
 
 
 @contextmanager

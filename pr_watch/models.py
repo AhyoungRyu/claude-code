@@ -116,6 +116,19 @@ class NotificationItem:
 
 
 @dataclass(frozen=True)
+class HostSyncItem:
+    sync_id: str
+    event_id: str
+    host: str
+    target_id: str
+    status: str
+    external_id: str = ""
+    error: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     action: str
     event_id: str
