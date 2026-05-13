@@ -112,6 +112,7 @@ Sync pending events once:
 ```bash
 pr-watch host sync-once --host conductor
 pr-watch host sync-once --host conductor --trigger-confirmed
+pr-watch host sync-once --host codex-app --notify-prompt-confirmed
 ```
 
 Confirm an inferred or rebind candidate without approving delivery:
@@ -144,6 +145,7 @@ Host surfaces are intentionally different:
 | Desktop notification | Sends a local macOS notification when polling or `notify` runs | Does not approve, resume, queue, or update app unread state |
 | In-app MCP inbox | Stores durable `in_app` notifications readable through MCP tools | Does not make Codex App show an automatic badge or popup by itself |
 | Conductor mirror | Experimental/private-surface SQLite adapter that inserts assistant-role synthetic PR Watch update or binding-confirmation messages into the matched Conductor session and marks its session/workspace unread | Does not send user input, execute the session, or use Conductor's sidecar socket |
+| Notify prompt soft trigger | With `notify-prompt` or `--notify-prompt-confirmed`, resumes or queues a guardrailed notification-only prompt asking whether to inspect the PR update | Does not mark the event delivered, inspect files, call GitHub, edit code, comment, push, or take external actions |
 | Confirmed-binding auto-trigger | With `--trigger-confirmed`, approves/queues/resumes only confirmed, high-confidence bindings | Does not auto-confirm first inferred bindings; ambiguous or low-confidence events stay pending |
 
 Codex App support is currently diagnostic only for push-style UI. MCP
@@ -171,6 +173,21 @@ that may invoke `claude --resume` or `codex resume`, use:
 
 ```bash
 pr-watch host sync-once --trigger-confirmed --session-state idle
+```
+
+Use `--notify-prompt-confirmed` when mirroring is unavailable but the host can
+resume or queue a CLI/app session. This sends a notification-only prompt into
+the confirmed bound session and leaves the PR event `pending` /
+`awaiting_approval`. Conductor host sync skips the soft trigger when its mirror
+succeeds. The service path defaults this soft prompt session state to `idle`, so
+opting in sends the safe prompt immediately; pass
+`--notify-prompt-session-state unknown` if you prefer queue-only behavior. You
+can also target one event manually:
+
+```bash
+pr-watch notify-prompt <event-id> --session-state unknown
+pr-watch host sync-once --host codex-app --notify-prompt-confirmed --session-state idle
+pr-watch service install --host-sync --host codex-app --notify-prompt-confirmed --notify-prompt-session-state idle
 ```
 
 Advanced registration options:
@@ -271,6 +288,7 @@ Useful MCP tools:
 | `confirm_binding_for_event` | Confirm or reassign the active PR/session binding without delivery |
 | `approve_resume_session` | Approve delivery to the matched session |
 | `queue_resume_session` | Queue delivery without trying to run immediately |
+| `notify_prompt_session` | Send a guardrailed notification-only prompt to the confirmed bound session |
 | `show_in_app_notifications` | Show app-hosted notification inbox items |
 | `ack_notification` | Mark an in-app notification as read |
 | `bind_pr` | Explicitly bind a PR to a Claude or Codex session |

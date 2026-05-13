@@ -101,6 +101,8 @@ def build_launchd_plist(
     host: str = "all",
     conductor_db_path: Optional[str] = None,
     trigger_confirmed: bool = False,
+    notify_prompt_confirmed: bool = False,
+    notify_prompt_session_state: str = "idle",
 ) -> str:
     program_arguments = [
         python_executable,
@@ -126,6 +128,9 @@ def build_launchd_plist(
             program_arguments.extend(["--conductor-db", str(Path(conductor_db_path).expanduser())])
         if trigger_confirmed:
             program_arguments.append("--trigger-confirmed")
+        if notify_prompt_confirmed:
+            program_arguments.append("--notify-prompt-confirmed")
+            program_arguments.extend(["--notify-prompt-session-state", notify_prompt_session_state])
 
     payload = {
         "Label": label,
@@ -158,6 +163,8 @@ def install_launchd_service(
     host: str = "all",
     conductor_db_path: Optional[str] = None,
     trigger_confirmed: bool = False,
+    notify_prompt_confirmed: bool = False,
+    notify_prompt_session_state: str = "idle",
 ) -> ServiceInstallResult:
     _validate_target(target)
     if interval_seconds < 1:
@@ -185,6 +192,8 @@ def install_launchd_service(
         host=host,
         conductor_db_path=conductor_db_path,
         trigger_confirmed=trigger_confirmed,
+        notify_prompt_confirmed=notify_prompt_confirmed,
+        notify_prompt_session_state=notify_prompt_session_state,
     )
 
     if dry_run:
@@ -251,6 +260,8 @@ def run_service_once(
     host: str = "all",
     conductor_db_path: Optional[str | Path] = None,
     trigger_confirmed: bool = False,
+    notify_prompt_confirmed: bool = False,
+    notify_prompt_session_state: str = "idle",
 ) -> ServiceRunResult:
     state_path = _state_dir_path(state_dir)
     with single_worker_lock(state_path) as acquired:
@@ -269,6 +280,8 @@ def run_service_once(
             host=host,
             conductor_db_path=conductor_db_path,
             trigger_confirmed=trigger_confirmed,
+            notify_prompt_confirmed=notify_prompt_confirmed,
+            notify_prompt_session_state=notify_prompt_session_state,
         )
 
 
@@ -285,6 +298,8 @@ def _run_service_once_locked(
     host: str,
     conductor_db_path: Optional[str | Path],
     trigger_confirmed: bool,
+    notify_prompt_confirmed: bool,
+    notify_prompt_session_state: str,
 ) -> ServiceRunResult:
     store = StateStore(state_db_path(str(state_path)))
     repos = store.list_watch_repos()
@@ -331,12 +346,21 @@ def _run_service_once_locked(
             hosts=[host],
             conductor_db_path=conductor_db_path,
             trigger_confirmed=trigger_confirmed,
+            notify_prompt_confirmed=notify_prompt_confirmed,
+            session_state=notify_prompt_session_state,
         )
         host_failed = any(
             item.action in {"failed", "missing", "schema_mismatch", "unavailable"}
             for item in sync_result.host_results
+        ) or any(
+            item.action in {"failed", "notify_prompt_failed"}
+            for item in [*sync_result.trigger_results, *sync_result.notify_prompt_results]
         )
-        host_message = _host_sync_message(sync_result.host_results, len(sync_result.trigger_results))
+        host_message = _host_sync_message(
+            sync_result.host_results,
+            len(sync_result.trigger_results),
+            len(sync_result.notify_prompt_results),
+        )
 
     if any(item.status == "failed" for item in repo_results):
         status = "completed_with_errors"
@@ -349,8 +373,8 @@ def _run_service_once_locked(
     return ServiceRunResult(status, event_count=event_count, repo_results=repo_results, message=host_message)
 
 
-def _host_sync_message(host_results: list[object], trigger_count: int) -> str:
-    if not host_results and not trigger_count:
+def _host_sync_message(host_results: list[object], trigger_count: int, notify_prompt_count: int = 0) -> str:
+    if not host_results and not trigger_count and not notify_prompt_count:
         return "host sync: no eligible pending host events"
     mirrored = sum(1 for item in host_results if getattr(item, "action", "") == "mirrored")
     confirmations = sum(1 for item in host_results if getattr(item, "action", "") == "confirmation_requested")
@@ -366,7 +390,7 @@ def _host_sync_message(host_results: list[object], trigger_count: int) -> str:
     return (
         f"host sync: mirrored={mirrored} confirmation_requested={confirmations} "
         f"already_synced={already} confirmation_already_requested={already_confirmations} "
-        f"failed={failed} triggered={trigger_count}"
+        f"failed={failed} triggered={trigger_count} notify_prompted={notify_prompt_count}"
     )
 
 

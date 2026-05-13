@@ -6,7 +6,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 from .config import config_bool, load_config, state_db_path
-from .delivery import approve_event
+from .delivery import approve_event, notify_prompt_event
 from .github import current_user, poll_once as github_poll_once
 from .host_adapter import status as host_bridge_status
 from .host_adapter import sync_once as host_bridge_sync_once
@@ -174,6 +174,22 @@ def queue_resume_session(event_id: str, state_dir: Optional[str] = None) -> Dict
     )
 
 
+def notify_prompt_session(
+    event_id: str,
+    session_state: str = "unknown",
+    state_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send a safe notification-only prompt into the bound session."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = notify_prompt_event(
+        store,
+        event_id,
+        session_state=session_state,
+    )
+    return _to_json(result)
+
+
 def notify(
     event_id: str,
     mode: Optional[str] = None,
@@ -249,6 +265,7 @@ def sync_host_once(
     host: str = "all",
     conductor_db_path: Optional[str] = None,
     trigger_confirmed: bool = False,
+    notify_prompt_confirmed: bool = False,
     session_state: str = "unknown",
     busy_policy: Optional[str] = None,
     state_dir: Optional[str] = None,
@@ -262,6 +279,7 @@ def sync_host_once(
         hosts=[host],
         conductor_db_path=conductor_db_path,
         trigger_confirmed=trigger_confirmed,
+        notify_prompt_confirmed=notify_prompt_confirmed,
         session_state=session_state,
         busy_policy=busy_policy or config.get("busy_policy", "run_if_idle_queue_if_busy"),
     )
@@ -300,6 +318,7 @@ def build_server() -> Any:
     server.tool()(approve)
     server.tool()(approve_resume_session)
     server.tool()(queue_resume_session)
+    server.tool()(notify_prompt_session)
     server.tool()(notify)
     server.tool()(list_queue)
     server.tool()(list_notifications)

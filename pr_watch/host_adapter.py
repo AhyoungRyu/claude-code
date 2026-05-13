@@ -10,7 +10,7 @@ from .conductor_adapter import (
     mirror_confirmation_to_conductor,
     mirror_event_to_conductor,
 )
-from .delivery import DEFAULT_BUSY_POLICY, approve_event
+from .delivery import DEFAULT_BUSY_POLICY, approve_event, notify_prompt_event
 from .models import Binding, InboxItem
 from .state import StateStore
 
@@ -54,6 +54,7 @@ class HostTriggerResult:
 class HostSyncResult:
     host_results: List[HostEventResult] = field(default_factory=list)
     trigger_results: List[HostTriggerResult] = field(default_factory=list)
+    notify_prompt_results: List[HostTriggerResult] = field(default_factory=list)
     codex_app: CodexAppStatus = field(default_factory=CodexAppStatus)
 
 
@@ -66,6 +67,7 @@ def sync_once(
     hosts: Iterable[str] = ("all",),
     conductor_db_path: Optional[str | Path] = None,
     trigger_confirmed: bool = False,
+    notify_prompt_confirmed: bool = False,
     runner: Optional[object] = None,
     session_state: str = "unknown",
     busy_policy: str = DEFAULT_BUSY_POLICY,
@@ -81,6 +83,12 @@ def sync_once(
     if "conductor" in selected_hosts:
         host_results.extend(_sync_conductor(store, events, conductor_db_path))
 
+    mirrored_event_ids = {
+        item.event_id
+        for item in host_results
+        if item.action in {"mirrored", "already_synced"} and item.event_id
+    }
+
     trigger_results: List[HostTriggerResult] = []
     if trigger_confirmed:
         trigger_results.extend(
@@ -93,7 +101,23 @@ def sync_once(
             )
         )
 
-    return HostSyncResult(host_results=host_results, trigger_results=trigger_results)
+    notify_prompt_results: List[HostTriggerResult] = []
+    if notify_prompt_confirmed:
+        notify_prompt_results.extend(
+            _notify_prompt_confirmed_events(
+                store,
+                events,
+                mirrored_event_ids=mirrored_event_ids,
+                runner=runner,
+                session_state=session_state,
+            )
+        )
+
+    return HostSyncResult(
+        host_results=host_results,
+        trigger_results=trigger_results,
+        notify_prompt_results=notify_prompt_results,
+    )
 
 
 def _normalize_hosts(hosts: Iterable[str]) -> set[str]:
@@ -208,6 +232,29 @@ def _trigger_confirmed_events(
             session_state=session_state,
             busy_policy=busy_policy,
         )
+        results.append(HostTriggerResult(event.event_id, delivery.action, delivery.message))
+    return results
+
+
+def _notify_prompt_confirmed_events(
+    store: StateStore,
+    events: Iterable[InboxItem],
+    mirrored_event_ids: set[str],
+    runner: Optional[object],
+    session_state: str,
+) -> List[HostTriggerResult]:
+    results: List[HostTriggerResult] = []
+    for event in events:
+        if event.event_id in mirrored_event_ids:
+            continue
+        delivery = notify_prompt_event(
+            store,
+            event.event_id,
+            runner=runner,
+            session_state=session_state,
+        )
+        if delivery.action == "notify_prompt_skipped":
+            continue
         results.append(HostTriggerResult(event.event_id, delivery.action, delivery.message))
     return results
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import config_bool, load_config, set_config_value, state_db_path
-from .delivery import DEFAULT_BUSY_POLICY, approve_event
+from .delivery import DEFAULT_BUSY_POLICY, approve_event, notify_prompt_event
 from .github import current_user, daemon_loop, poll_once
 from .host_integration import (
     build_codex_mcp_add_command,
@@ -168,6 +168,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             if result.message:
                 print(result.message)
             return 0 if result.action != "failed" else 2
+        if args.command == "notify-prompt":
+            store = StateStore(state_db_path(args.state_dir))
+            result = notify_prompt_event(
+                store,
+                args.event_id,
+                session_state=args.session_state,
+            )
+            print(f"{result.action}: {args.event_id}")
+            if result.command:
+                print("command:", " ".join(result.command[:-1]), "<prompt>")
+            if result.message:
+                print(result.message)
+            return 0 if result.action != "notify_prompt_failed" else 2
         if args.command == "notifications":
             store = StateStore(state_db_path(args.state_dir))
             print_notifications(store, include_done=args.all)
@@ -313,6 +326,13 @@ def build_parser() -> argparse.ArgumentParser:
     notify.add_argument("--mode", choices=sorted(VALID_NOTIFICATION_MODES))
     notify.add_argument("--force", action="store_true", help="send again even if this event/channel was notified")
 
+    notify_prompt = subparsers.add_parser(
+        "notify-prompt",
+        help="send a safe notification-only prompt to the bound session",
+    )
+    notify_prompt.add_argument("event_id")
+    notify_prompt.add_argument("--session-state", choices=["idle", "working", "unknown"], default="unknown")
+
     notifications = subparsers.add_parser("notifications", help="show in-app notification inbox and failures")
     notifications.add_argument("--all", action="store_true", help="include sent desktop notifications")
 
@@ -356,6 +376,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="auto-trigger only confirmed high-confidence bindings during host sync",
     )
+    setup.add_argument(
+        "--notify-prompt-confirmed",
+        action="store_true",
+        help="soft-trigger safe notify-only prompts for confirmed high-confidence bindings during host sync",
+    )
+    setup.add_argument(
+        "--notify-prompt-session-state",
+        choices=["idle", "working", "unknown"],
+        default="idle",
+        help="session state used for service notify prompts; idle sends, unknown/working queues",
+    )
     setup.set_defaults(command="setup")
 
     service = subparsers.add_parser("service", help="manage the user-level background watcher service")
@@ -384,6 +415,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--trigger-confirmed",
         action="store_true",
         help="auto-trigger only confirmed high-confidence bindings during host sync",
+    )
+    service_install.add_argument(
+        "--notify-prompt-confirmed",
+        action="store_true",
+        help="soft-trigger safe notify-only prompts for confirmed high-confidence bindings during host sync",
+    )
+    service_install.add_argument(
+        "--notify-prompt-session-state",
+        choices=["idle", "working", "unknown"],
+        default="idle",
+        help="session state used for service notify prompts; idle sends, unknown/working queues",
     )
 
     service_status_parser = service_sub.add_parser("status", help="show launchd service status")
@@ -419,6 +461,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="auto-trigger only confirmed high-confidence bindings during host sync",
     )
+    service_run_once.add_argument(
+        "--notify-prompt-confirmed",
+        action="store_true",
+        help="soft-trigger safe notify-only prompts for confirmed high-confidence bindings during host sync",
+    )
+    service_run_once.add_argument(
+        "--notify-prompt-session-state",
+        choices=["idle", "working", "unknown"],
+        default="idle",
+        help="session state used for service notify prompts; idle sends, unknown/working queues",
+    )
     service.set_defaults(command="service")
 
     host = subparsers.add_parser("host", help="sync pending events into local host surfaces")
@@ -432,6 +485,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--trigger-confirmed",
         action="store_true",
         help="approve/queue/resume only confirmed high-confidence bindings",
+    )
+    host_sync.add_argument(
+        "--notify-prompt-confirmed",
+        action="store_true",
+        help="soft-trigger safe notify-only prompts for confirmed high-confidence bindings",
     )
     host_sync.add_argument("--session-state", choices=["idle", "working", "unknown"], default="unknown")
     host_sync.add_argument(
@@ -543,6 +601,7 @@ def handle_host(args: argparse.Namespace) -> int:
             hosts=[args.host],
             conductor_db_path=args.conductor_db,
             trigger_confirmed=args.trigger_confirmed,
+            notify_prompt_confirmed=args.notify_prompt_confirmed,
             session_state=args.session_state,
             busy_policy=args.busy_policy or DEFAULT_BUSY_POLICY,
         )
@@ -559,9 +618,19 @@ def handle_host(args: argparse.Namespace) -> int:
             print(f"trigger\t{item.event_id}\t{item.action}")
             if item.message:
                 print(f"  {item.message}")
-        if not result.host_results and not result.trigger_results:
+        for item in result.notify_prompt_results:
+            print(f"notify-prompt\t{item.event_id}\t{item.action}")
+            if item.message:
+                print(f"  {item.message}")
+        if not result.host_results and not result.trigger_results and not result.notify_prompt_results:
             print("No eligible pending host events.")
-        failed = any(item.action in {"failed", "missing", "schema_mismatch", "unavailable"} for item in result.host_results)
+        failed = any(
+            item.action in {"failed", "missing", "schema_mismatch", "unavailable"}
+            for item in result.host_results
+        ) or any(
+            item.action in {"failed", "notify_prompt_failed"}
+            for item in [*result.trigger_results, *result.notify_prompt_results]
+        )
         return 1 if failed else 0
     print("pr-watch host: choose status or sync-once", file=sys.stderr)
     return 2
@@ -606,6 +675,8 @@ def handle_setup(args: argparse.Namespace) -> int:
         host=args.host,
         conductor_db_path=args.conductor_db,
         trigger_confirmed=args.trigger_confirmed,
+        notify_prompt_confirmed=args.notify_prompt_confirmed,
+        notify_prompt_session_state=args.notify_prompt_session_state,
     )
     print(f"{result.status}: {result.label}")
     print(f"domain: {result.domain}")
@@ -663,6 +734,8 @@ def handle_service(args: argparse.Namespace) -> int:
             host=args.host,
             conductor_db_path=args.conductor_db,
             trigger_confirmed=args.trigger_confirmed,
+            notify_prompt_confirmed=args.notify_prompt_confirmed,
+            notify_prompt_session_state=args.notify_prompt_session_state,
         )
         print(f"{result.status}: {result.label}")
         print(f"domain: {result.domain}")
@@ -715,6 +788,8 @@ def handle_service(args: argparse.Namespace) -> int:
             host=args.host,
             conductor_db_path=args.conductor_db,
             trigger_confirmed=args.trigger_confirmed,
+            notify_prompt_confirmed=args.notify_prompt_confirmed,
+            notify_prompt_session_state=args.notify_prompt_session_state,
         )
         print(f"{result.status}: recorded {result.event_count} actionable event(s)")
         if result.message:

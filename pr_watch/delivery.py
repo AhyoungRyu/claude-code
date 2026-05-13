@@ -10,6 +10,7 @@ from .util import shell_join
 
 
 DEFAULT_BUSY_POLICY = "run_if_idle_queue_if_busy"
+NOTIFY_PROMPT_HOST = "notify_prompt"
 
 
 @dataclass(frozen=True)
@@ -112,12 +113,86 @@ def approve_event(
     return DeliveryResult("failed", event_id, command=command, message=error)
 
 
+def notify_prompt_event(
+    store: StateStore,
+    event_id: str,
+    session_state: str = "unknown",
+    runner: Optional[object] = None,
+) -> DeliveryResult:
+    event = store.get_event(event_id)
+    binding = store.get_binding(event.binding_id)
+    skip_reason = notify_prompt_skip_reason(event, binding)
+    if skip_reason:
+        return DeliveryResult("notify_prompt_skipped", event_id, message=skip_reason)
+
+    assert binding is not None
+    existing = store.get_host_sync(event.event_id, NOTIFY_PROMPT_HOST, binding.session_id)
+    if existing:
+        return DeliveryResult(
+            _notify_prompt_dedupe_action(existing.status),
+            event_id,
+            message="notify prompt already recorded for this event/session",
+        )
+
+    prompt = render_notify_prompt(event)
+    command = resume_command(binding, prompt)
+    normalized_state = session_state if session_state in {"idle", "working", "unknown"} else "unknown"
+    if normalized_state != "idle":
+        store.enqueue(event_id, command, prompt)
+        store.upsert_host_sync(event_id, NOTIFY_PROMPT_HOST, binding.session_id, "queued")
+        return DeliveryResult("notify_prompt_queued", event_id, command=command)
+
+    actual_runner = runner or SubprocessRunner()
+    result = actual_runner.run(command)
+    if result.returncode == 0:
+        store.upsert_host_sync(event_id, NOTIFY_PROMPT_HOST, binding.session_id, "sent")
+        return DeliveryResult("notify_prompt_sent", event_id, command=command)
+
+    error = result.stderr.strip() or result.stdout.strip() or f"resume command exited {result.returncode}"
+    store.upsert_host_sync(event_id, NOTIFY_PROMPT_HOST, binding.session_id, "failed", error=error)
+    return DeliveryResult("notify_prompt_failed", event_id, command=command, message=error)
+
+
+def notify_prompt_skip_reason(event: InboxItem, binding: Optional[Binding]) -> str:
+    if event.status != "pending" or event.delivery_status != "awaiting_approval":
+        return "notify prompt requires a pending event awaiting approval"
+    if event.confidence != "high":
+        return "notify prompt requires a high-confidence event"
+    if binding is None or event.binding_id != binding.binding_id:
+        return "notify prompt requires an active confirmed session binding"
+    if not binding.confirmed:
+        return "notify prompt does not confirm inferred or rebind candidates"
+    if not binding.active:
+        return "notify prompt requires the active binding"
+    if binding.confidence != "high":
+        return "notify prompt requires a high-confidence binding"
+    return ""
+
+
 def resume_command(binding: Binding, prompt: str) -> List[str]:
     if binding.agent == "claude":
         return ["claude", "--resume", binding.session_id, prompt]
     if binding.agent == "codex":
         return ["codex", "resume", binding.session_id, prompt]
     raise ValueError(f"unsupported agent: {binding.agent}")
+
+
+def render_notify_prompt(event: InboxItem) -> str:
+    return "\n".join(
+        [
+            "PR Watch notification only.",
+            "",
+            f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
+            f"Event: {event.summary}",
+            f"Actor: {event.actor}",
+            f"Link: {event.pr_url}",
+            "",
+            "Do not run tools, inspect files, call GitHub, edit code, post comments, push, "
+            "or take external action yet.",
+            "Do not treat this as approval to work on the PR.",
+            "Ask the user whether they want you to inspect it.",
+        ]
+    )
 
 
 def render_resume_prompt(event: InboxItem) -> str:
@@ -137,3 +212,11 @@ def render_resume_prompt(event: InboxItem) -> str:
             "Please summarize what changed and ask before posting any GitHub comment.",
         ]
     )
+
+
+def _notify_prompt_dedupe_action(status: str) -> str:
+    if status == "sent":
+        return "notify_prompt_already_sent"
+    if status == "queued":
+        return "notify_prompt_already_queued"
+    return "notify_prompt_already_attempted"
