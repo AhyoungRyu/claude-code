@@ -36,9 +36,9 @@ pr-watch inbox
 Watch repositories continuously through a user-level macOS service:
 
 ```bash
-pr-watch watch add owner/name
-pr-watch watch list
-pr-watch service install --interval 120 --notification-mode auto --target macos-launchd
+pr-watch setup --current-repo --install-service
+# or
+pr-watch setup --repo owner/name --install-service
 pr-watch service status
 ```
 
@@ -77,11 +77,22 @@ registered server launches the current Python environment with
 `python -m pr_watch --state-dir ~/.pr-watch mcp`, so app-hosted sessions and
 terminal sessions share the same watcher state. Restart Codex App or start a
 new Conductor/Codex session after installation so the host reloads MCP config.
+`install-mcp` only registers tools; it does not add watched repositories or
+install the background service.
 
-For the background watcher flow, keep MCP registered and install the service:
-launchd detects PR updates in the background, while MCP remains the approval,
-resume, queue, and in-app notification interface. Background notifications do
-not approve, resume, or queue sessions by themselves.
+For the background watcher flow, keep MCP registered and run setup from the
+repository you want to watch:
+
+```bash
+pr-watch setup --current-repo --install-service
+```
+
+`setup --current-repo` detects the GitHub `owner/name` from the current git
+remote, adds it to the explicit watch allowlist, and installs or updates the
+launchd service only when `--install-service` is present. launchd detects PR
+updates in the background, while MCP remains the approval, resume, queue, and
+in-app notification interface. Background notifications do not approve, resume,
+or queue sessions by themselves.
 
 Advanced registration options:
 
@@ -216,7 +227,22 @@ pr-watch config set poll_interval_seconds 120
 
 ### Background Watcher
 
-Manage the repositories that launchd polls:
+Background polling uses an explicit repository allowlist. The easiest setup path
+is:
+
+```bash
+pr-watch setup --current-repo --install-service
+pr-watch setup --repo owner/name --install-service
+```
+
+Use `--notification-mode`, `--interval`, `--state-dir`, and `--dry-run` with
+`setup` when you want to preview or customize the service install. `setup` adds
+the repository first and installs the service only when `--install-service` is
+present. `setup --interactive` is intentionally small: it prompts for the repo
+and whether to install the service, then uses the same defaults as the
+non-interactive command.
+
+Manual watch control remains available for power users:
 
 ```bash
 pr-watch watch add owner/name
@@ -240,11 +266,13 @@ directory. If a previous poll is still active, the overlapping run exits
 cleanly without doing duplicate work.
 
 `service run-once` loads watched repositories from local state and polls them
-sequentially. It preserves the same dedupe, inbox status, notification, and
-approval semantics as `daemon --once`, so manual CLI/MCP polling continues to
-work exactly as before. Notifications are currently sent per event and deduped
-per event/channel; batching is intentionally deferred so the service stays
-small and the existing event-level recovery semantics remain unchanged.
+sequentially. The service detects PR updates; MCP handles approval, resume,
+queue, and inbox workflows. It preserves the same dedupe, inbox status,
+notification, and approval semantics as `daemon --once`, so manual CLI/MCP
+polling continues to work exactly as before. Notifications are currently sent
+per event and deduped per event/channel; batching is intentionally deferred so
+the service stays small and the existing event-level recovery semantics remain
+unchanged.
 
 By default, `pr-watch` ignores draft pull requests and only records events for
 PRs that are ready for review. Draft PRs usually do not have meaningful review

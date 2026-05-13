@@ -1,4 +1,6 @@
+import os
 import plistlib
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -18,6 +20,7 @@ from pr_watch.host_integration import (
 )
 from pr_watch.models import SessionInfo
 from pr_watch.notifications import resolve_notification_mode
+from pr_watch.setup import detect_current_repo, parse_github_remote_url
 from pr_watch.sessions import discover_sessions
 from pr_watch.state import StateStore
 from pr_watch.workflow import create_explicit_binding, route_event
@@ -1253,6 +1256,110 @@ class PrWatchTests(unittest.TestCase):
             self.assertIn("watching ahyoungryu/claude-code", output.getvalue())
             self.assertIn("sendbird/ai-agent-js", output.getvalue())
             self.assertEqual([], store.list_watch_repos())
+
+    def test_parse_github_remote_url_supports_common_forms(self):
+        cases = {
+            "https://github.com/Sendbird/AI-Agent-JS.git": "sendbird/ai-agent-js",
+            "https://github.com/Sendbird/AI-Agent-JS": "sendbird/ai-agent-js",
+            "git@github.com:Sendbird/AI-Agent-JS.git": "sendbird/ai-agent-js",
+            "ssh://git@github.com/Sendbird/AI-Agent-JS.git": "sendbird/ai-agent-js",
+        }
+
+        for remote, expected in cases.items():
+            with self.subTest(remote=remote):
+                self.assertEqual(expected, parse_github_remote_url(remote))
+
+        self.assertIsNone(parse_github_remote_url("https://example.com/sendbird/ai-agent-js.git"))
+
+    def test_detect_current_repo_reads_git_remote(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True, text=True, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "git@github.com:Sendbird/AI-Agent-JS.git"],
+                cwd=tmpdir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            self.assertEqual("sendbird/ai-agent-js", detect_current_repo(tmpdir))
+
+    def test_setup_cli_adds_explicit_repo_without_service(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(["--state-dir", tmpdir, "setup", "--repo", "Sendbird/AI-Agent-JS"])
+
+            self.assertEqual(0, code)
+            self.assertIn("watching sendbird/ai-agent-js", output.getvalue())
+            self.assertIn("service install skipped", output.getvalue())
+            self.assertEqual(["sendbird/ai-agent-js"], make_store(tmpdir).list_watch_repos())
+
+    def test_setup_cli_current_repo_detects_remote(self):
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, capture_output=True, text=True, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/AhyoungRyu/claude-code.git"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(repo_dir)
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = main(["--state-dir", state_dir, "setup", "--current-repo"])
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(0, code)
+            self.assertIn("watching ahyoungryu/claude-code", output.getvalue())
+            self.assertEqual(["ahyoungryu/claude-code"], make_store(state_dir).list_watch_repos())
+
+    def test_setup_cli_dry_run_does_not_write_watch_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(["--state-dir", tmpdir, "setup", "--repo", "sendbird/ai-agent-js", "--dry-run"])
+
+            self.assertEqual(0, code)
+            self.assertIn("would watch sendbird/ai-agent-js", output.getvalue())
+            self.assertEqual([], make_store(tmpdir).list_watch_repos())
+
+    def test_setup_cli_install_service_dry_run_prints_plist_without_writing_service(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plist_path = Path(tmpdir) / "LaunchAgents" / "com.example.pr-watch.test.plist"
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--state-dir",
+                        tmpdir,
+                        "setup",
+                        "--repo",
+                        "sendbird/ai-agent-js",
+                        "--install-service",
+                        "--dry-run",
+                        "--interval",
+                        "90",
+                        "--notification-mode",
+                        "in_app",
+                        "--label",
+                        "com.example.pr-watch.test",
+                        "--plist-path",
+                        str(plist_path),
+                    ]
+                )
+
+            text = output.getvalue()
+            self.assertEqual(0, code)
+            self.assertIn("would watch sendbird/ai-agent-js", text)
+            self.assertIn("dry_run: com.example.pr-watch.test", text)
+            self.assertIn("<key>StartInterval</key>", text)
+            self.assertFalse(plist_path.exists())
+            self.assertEqual([], make_store(tmpdir).list_watch_repos())
 
     def test_launchd_plist_runs_service_once_on_interval(self):
         from pr_watch.service import build_launchd_plist

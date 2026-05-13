@@ -25,8 +25,10 @@ from .service import (
     service_status,
     uninstall_launchd_service,
 )
+from .setup import detect_current_repo
 from .sessions import discover_sessions
 from .state import StateStore
+from .util import normalize_repo_full_name
 from .workflow import create_explicit_binding
 
 
@@ -138,6 +140,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if args.command == "watch":
             return handle_watch(args)
+        if args.command == "setup":
+            return handle_setup(args)
         if args.command == "service":
             return handle_service(args)
         if args.command == "config":
@@ -270,6 +274,30 @@ def build_parser() -> argparse.ArgumentParser:
     watch_sub.add_parser("clear", help="remove all watched repositories")
     watch.set_defaults(command="watch")
 
+    setup = subparsers.add_parser("setup", help="guided setup for background repository watching")
+    setup_source = setup.add_mutually_exclusive_group()
+    setup_source.add_argument("--current-repo", action="store_true", help="watch the current git repository")
+    setup_source.add_argument("--repo", help="repository as owner/name")
+    setup.add_argument("--interactive", action="store_true", help="prompt for setup choices")
+    setup.add_argument("--install-service", action="store_true", help="install or update the background service")
+    setup.add_argument("--interval", type=int, default=120, help="launchd StartInterval in seconds")
+    setup.add_argument(
+        "--notification-mode",
+        choices=sorted(SERVICE_NOTIFICATION_MODES),
+        default="auto",
+        help="notification mode used by service run-once",
+    )
+    setup.add_argument("--target", choices=["macos-launchd"], default="macos-launchd")
+    setup.add_argument("--python", dest="python_executable", default=sys.executable)
+    setup.add_argument("--label", default=DEFAULT_LAUNCHD_LABEL)
+    setup.add_argument("--plist-path", help="override LaunchAgent plist path")
+    setup.add_argument("--log-dir", help="override service log directory")
+    setup.add_argument("--dry-run", action="store_true", help="print planned changes without applying them")
+    setup.add_argument("--fixture", help="fixture path for local testing")
+    setup.add_argument("--user", help="GitHub login for local testing; defaults to gh api user")
+    setup.add_argument("--timeout", type=int, help="optional run-once time budget in seconds")
+    setup.set_defaults(command="setup")
+
     service = subparsers.add_parser("service", help="manage the user-level background watcher service")
     service_sub = service.add_subparsers(dest="service_command")
     service_install = service_sub.add_parser("install", help="install the macOS launchd one-shot watcher")
@@ -401,6 +429,79 @@ def handle_watch(args: argparse.Namespace) -> int:
         print(f"cleared {count} watched repository/repositories")
         return 0
     return 2
+
+
+def handle_setup(args: argparse.Namespace) -> int:
+    repo = _setup_repo(args)
+    install_service = args.install_service
+    if args.interactive:
+        repo, install_service = _prompt_setup(repo, install_service)
+
+    if not repo:
+        print("pr-watch setup: choose --current-repo, --repo owner/name, or --interactive", file=sys.stderr)
+        return 2
+    repo = normalize_repo_full_name(repo)
+
+    if args.dry_run:
+        print(f"would watch {repo}")
+    else:
+        store = StateStore(state_db_path(args.state_dir))
+        repo = store.add_watch_repo(repo)
+        print(f"watching {repo}")
+
+    if not install_service:
+        print("service install skipped; pass --install-service to enable background polling")
+        return 0
+
+    result = install_launchd_service(
+        state_dir=args.state_dir,
+        interval_seconds=args.interval,
+        notification_mode=args.notification_mode,
+        target=args.target,
+        label=args.label,
+        python_executable=args.python_executable,
+        plist_path=Path(args.plist_path) if args.plist_path else None,
+        log_dir=Path(args.log_dir) if args.log_dir else None,
+        dry_run=args.dry_run,
+        fixture=args.fixture,
+        user=args.user,
+        timeout_seconds=args.timeout,
+    )
+    print(f"{result.status}: {result.label}")
+    print(f"domain: {result.domain}")
+    print(f"plist: {result.plist_path}")
+    if result.message:
+        print(result.message)
+    if args.dry_run:
+        print(result.plist, end="")
+    return 0 if result.status in {"installed", "dry_run"} else 1
+
+
+def _setup_repo(args: argparse.Namespace) -> Optional[str]:
+    if args.current_repo:
+        return detect_current_repo(Path.cwd())
+    return args.repo
+
+
+def _prompt_setup(repo: Optional[str], install_service: bool) -> tuple[Optional[str], bool]:
+    detected_repo = repo
+    if detected_repo is None:
+        try:
+            detected_repo = detect_current_repo(Path.cwd())
+        except ValueError:
+            detected_repo = None
+
+    prompt = "Repository to watch"
+    if detected_repo:
+        prompt += f" [{detected_repo}]"
+    prompt += ": "
+    answer = input(prompt).strip()
+    selected_repo = answer or detected_repo
+
+    service_default = "y" if install_service else "n"
+    service_answer = input(f"Install/update background service? [{service_default}] ").strip().lower()
+    selected_install_service = install_service if not service_answer else service_answer in {"y", "yes"}
+    return selected_repo, selected_install_service
 
 
 def handle_service(args: argparse.Namespace) -> int:
