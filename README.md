@@ -91,8 +91,8 @@ pr-watch setup --current-repo --install-service
 remote, adds it to the explicit watch allowlist, and installs or updates the
 launchd service only when `--install-service` is present. launchd detects PR
 updates in the background, while MCP remains the approval, resume, queue, and
-in-app notification interface. Background notifications do not approve, resume,
-or queue sessions by themselves.
+in-app notification interface. Background notifications stay notification-only
+for this live PR Watch smoke test.
 
 ### Host Bridge
 
