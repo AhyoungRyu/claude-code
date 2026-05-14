@@ -184,7 +184,9 @@ The Conductor mirror is marked experimental because it writes to Conductor's
 private local SQLite schema. It is the current best-effort path for
 session-visible Conductor notifications because Conductor renders its own
 `session_messages` rows, not Codex JSONL rows written by an external `codex`
-process. Use `host status` first when diagnosing the private DB surface.
+process. Synthetic turns are inserted without host queue metadata, so they are
+visible notifications rather than executable queued prompts. Use `host status`
+first when diagnosing the private DB surface.
 Mirroring is deduped per event/host target and ignores legacy hidden synthetic
 rows that lack a visible `turn_id`, so upgrading PR Watch can repair earlier
 hidden notifications without spamming once a visible turn exists. It also

@@ -159,21 +159,23 @@ def _mirror_message_to_conductor(
                 session_id=binding.session_id,
                 message_id=message_id,
             )
-            conn.execute(
-                """
-                insert into session_messages (
-                  id, session_id, role, content, created_at, sent_at, turn_id, queue_order
-                ) values (?, ?, 'user', ?, ?, ?, ?, 1)
-                """,
-                (turn_id, session_id, user_content, created_at, created_at, turn_id),
+            _insert_synthetic_message(
+                conn,
+                message_id=turn_id,
+                session_id=session_id,
+                role="user",
+                content=user_content,
+                created_at=created_at,
+                turn_id=turn_id,
             )
-            conn.execute(
-                """
-                insert into session_messages (
-                  id, session_id, role, content, created_at, sent_at, turn_id
-                ) values (?, ?, 'assistant', ?, ?, ?, ?)
-                """,
-                (message_id, session_id, assistant_content, created_at, created_at, turn_id),
+            _insert_synthetic_message(
+                conn,
+                message_id=message_id,
+                session_id=session_id,
+                role="assistant",
+                content=assistant_content,
+                created_at=created_at,
+                turn_id=turn_id,
             )
             conn.execute(
                 """
@@ -195,6 +197,36 @@ def _mirror_message_to_conductor(
         session_id=session_id,
         message_id=turn_id,
         message=success_message,
+    )
+
+
+def _insert_synthetic_message(
+    conn: sqlite3.Connection,
+    message_id: str,
+    session_id: str,
+    role: str,
+    content: str,
+    created_at: str,
+    turn_id: str,
+) -> None:
+    columns = [
+        "id",
+        "session_id",
+        "role",
+        "content",
+        "created_at",
+        "sent_at",
+        "turn_id",
+        "queue_order",
+    ]
+    values: list[object] = [message_id, session_id, role, content, created_at, created_at, turn_id, None]
+    if "is_resumable_message" in _table_columns(conn, "session_messages"):
+        columns.append("is_resumable_message")
+        values.append(0)
+    placeholders = ", ".join("?" for _ in columns)
+    conn.execute(
+        f"insert into session_messages ({', '.join(columns)}) values ({placeholders})",
+        tuple(values),
     )
 
 

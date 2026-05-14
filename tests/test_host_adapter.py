@@ -11,6 +11,7 @@ from unittest.mock import patch
 from pr_watch.cli import main
 from pr_watch.conductor_adapter import (
     check_conductor_db,
+    mirror_confirmation_to_conductor,
     mirror_event_to_conductor,
 )
 from pr_watch.delivery import RecordingRunner
@@ -177,7 +178,7 @@ class HostAdapterTests(unittest.TestCase):
             assistant = next(row for row in messages if row[1] == "assistant")
             self.assertEqual(user[0], user[5])
             self.assertEqual(user[0], assistant[5])
-            self.assertEqual(1, user[6])
+            self.assertIsNone(user[6])
             self.assertIn(f"pr-watch:event_id={event.event_id}", user[2])
             self.assertIn("Suggested replies:", user[2])
             self.assertEqual(assistant[3], assistant[4])
@@ -190,6 +191,47 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("text", payload["message"]["content"][0]["type"])
             self.assertEqual(1, session_unread)
             self.assertEqual(1, workspace_unread)
+
+    def test_conductor_confirmation_synthetic_turns_are_not_host_queued(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path, session_id="conductor-session-1")
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate binding"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=binding.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+
+            result = mirror_confirmation_to_conductor(db_path, event, binding)
+
+            self.assertEqual("confirmation_requested", result.action)
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    select role, queue_order, is_resumable_message
+                    from session_messages
+                    order by role desc
+                    """
+                ).fetchall()
+            self.assertEqual(["user", "assistant"], [row[0] for row in rows])
+            self.assertTrue(all(row[1] is None for row in rows))
+            self.assertTrue(all(row[2] == 0 for row in rows))
 
     def test_conductor_mirror_can_match_claude_session_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
