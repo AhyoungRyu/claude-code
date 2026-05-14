@@ -179,14 +179,13 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual(user[0], assistant[5])
             self.assertEqual(1, user[6])
             self.assertIn(f"pr-watch:event_id={event.event_id}", user[2])
-            self.assertIn("notification only", user[2])
-            self.assertIn(f"pr-watch:event_id={event.event_id}", assistant[2])
-            self.assertIn("synthetic", assistant[2])
+            self.assertIn("Suggested replies:", user[2])
             self.assertEqual(assistant[3], assistant[4])
             payload = json.loads(assistant[2])
             self.assertEqual("assistant", payload["type"])
             self.assertEqual("conductor-session-1", payload["session_id"])
             self.assertEqual("assistant", payload["message"]["role"])
+            self.assertEqual("Inspect update", payload["suggested_replies"][0]["label"])
             self.assertNotIn("model", payload["message"])
             self.assertEqual("text", payload["message"]["content"][0]["type"])
             self.assertEqual(1, session_unread)
@@ -294,12 +293,80 @@ class HostAdapterTests(unittest.TestCase):
                     """,
                     (f"%{marker}%",),
                 ).fetchall()
-            self.assertEqual(3, len(rows))
+            self.assertEqual(2, len(rows))
             self.assertEqual("legacy-hidden", rows[0][0])
             visible_user = next(row for row in rows if row[1] == "user")
-            visible_assistant = next(row for row in rows if row[1] == "assistant" and row[0] != "legacy-hidden")
             self.assertEqual(visible_user[0], visible_user[2])
-            self.assertEqual(visible_user[0], visible_assistant[2])
+            with sqlite3.connect(db_path) as conn:
+                visible_assistant = conn.execute(
+                    """
+                    select id, role, turn_id from session_messages
+                    where role = 'assistant' and turn_id = ?
+                    """,
+                    (visible_user[0],),
+                ).fetchone()
+            self.assertIsNotNone(visible_assistant)
+
+    def test_conductor_mirror_repairs_visible_rows_without_suggested_replies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path, session_id="conductor-session-1")
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=True,
+                confirmation_source="explicit_bind",
+                evidence=["explicit user binding"],
+            )
+            event = make_inbox_item(store, binding_id=binding.binding_id)
+            marker = f"pr-watch:event_id={event.event_id}"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    insert into session_messages (
+                      id, session_id, role, content, created_at, sent_at, turn_id, queue_order
+                    ) values (
+                      'legacy-visible-turn', 'conductor-session-1', 'user', ?, '2026-05-14T00:00:00Z',
+                      '2026-05-14T00:00:00Z', 'legacy-visible-turn', 1
+                    )
+                    """,
+                    (f"PR Watch notification only.\n{marker}",),
+                )
+                conn.execute(
+                    """
+                    insert into session_messages (
+                      id, session_id, role, content, created_at, sent_at, turn_id
+                    ) values (
+                      'legacy-visible-assistant', 'conductor-session-1', 'assistant', ?,
+                      '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z', 'legacy-visible-turn'
+                    )
+                    """,
+                    (json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": marker}]}}),),
+                )
+
+            result = mirror_event_to_conductor(db_path, event, binding)
+
+            self.assertEqual("mirrored", result.action)
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    select id, role, turn_id, content from session_messages
+                    where content like ?
+                    order by created_at
+                    """,
+                    (f"%{marker}%",),
+                ).fetchall()
+            self.assertEqual(3, len(rows))
+            modern_user = next(row for row in rows if "Suggested replies:" in row[3])
+            self.assertNotEqual("legacy-visible-turn", modern_user[0])
+            self.assertEqual(modern_user[0], modern_user[2])
 
     def test_confirm_binding_for_event_mirrors_current_event_without_triggering_resume(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -383,8 +450,100 @@ class HostAdapterTests(unittest.TestCase):
             with sqlite3.connect(db_path) as conn:
                 rows = conn.execute("select content, created_at, sent_at from session_messages").fetchall()
             self.assertEqual(2, len(rows))
-            self.assertTrue(any("PR Watch notification only." in row[0] for row in rows))
+            self.assertTrue(any("Suggested replies:" in row[0] for row in rows))
             self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in row[0] for row in rows))
+
+    def test_conductor_confirmation_turn_has_clear_replies_and_button_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["confirmation_requested"], [item.action for item in result.host_results])
+            with sqlite3.connect(db_path) as conn:
+                user_content = conn.execute(
+                    "select content from session_messages where role = 'user'"
+                ).fetchone()[0]
+                assistant_content = conn.execute(
+                    "select content from session_messages where role = 'assistant'"
+                ).fetchone()[0]
+            self.assertIn("PR Watch: Is this the right session", user_content)
+            self.assertIn("Suggested replies:", user_content)
+            self.assertIn("Confirm this session", user_content)
+            self.assertIn("Not this session", user_content)
+            self.assertIn("Ignore this update", user_content)
+            self.assertNotIn("No PR inspection", user_content)
+            self.assertIn("pr-watch:prompt_version=2", user_content)
+            payload = json.loads(assistant_content)
+            labels = [item["label"] for item in payload["suggested_replies"]]
+            self.assertEqual(["Confirm this session", "Not this session", "Ignore this update"], labels)
+            self.assertEqual("2", payload["pr_watch"]["prompt_version"])
+            assistant_text = payload["message"]["content"][0]["text"]
+            self.assertIn("I found a likely PR Watch session match", assistant_text)
+            self.assertIn("I will not inspect the PR or touch GitHub", assistant_text)
+
+    def test_conductor_confirmed_update_turn_has_inspection_replies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=True,
+                active=True,
+                confirmation_source="explicit_bind",
+                evidence=["confirmed"],
+            )
+            make_inbox_item(store, binding_id=binding.binding_id)
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["mirrored"], [item.action for item in result.host_results])
+            with sqlite3.connect(db_path) as conn:
+                user_content = conn.execute(
+                    "select content from session_messages where role = 'user'"
+                ).fetchone()[0]
+                assistant_content = conn.execute(
+                    "select content from session_messages where role = 'assistant'"
+                ).fetchone()[0]
+            self.assertIn("PR Watch: PR #1049 has an update", user_content)
+            self.assertIn("Inspect update", user_content)
+            self.assertIn("Queue for later", user_content)
+            self.assertIn("Ignore this update", user_content)
+            self.assertIn("pr-watch:prompt_version=2", user_content)
+            payload = json.loads(assistant_content)
+            labels = [item["label"] for item in payload["suggested_replies"]]
+            self.assertEqual(["Inspect update", "Queue for later", "Ignore this update"], labels)
+            self.assertEqual("2", payload["pr_watch"]["prompt_version"])
 
     def test_host_sync_prefers_visible_conductor_turn_before_codex_resume_prompt(self):
         with tempfile.TemporaryDirectory() as tmpdir:

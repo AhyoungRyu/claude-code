@@ -661,6 +661,66 @@ class PrWatchTests(unittest.TestCase):
             self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
             self.assertEqual([], store.list_queue())
 
+    def test_mcp_reject_binding_for_event_keeps_event_pending_without_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import reject_binding_for_event
+
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            inbox_item = store.upsert_event(
+                make_review_event(),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["candidate"],
+            )
+
+            result = reject_binding_for_event(event_id=inbox_item.event_id, state_dir=tmpdir)
+
+            stored = store.get_event(inbox_item.event_id)
+            rejected = store.get_binding(candidate.binding_id)
+            self.assertEqual("rejected_binding", result["action"])
+            self.assertFalse(rejected.active)
+            self.assertFalse(rejected.confirmed)
+            self.assertEqual("pending", stored.status)
+            self.assertEqual("session_candidate_rejected", stored.delivery_status)
+            self.assertEqual("", stored.binding_id)
+
+    def test_cli_dismiss_event_marks_update_dismissed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            inbox_item = store.upsert_event(
+                make_review_event(),
+                status="pending",
+                delivery_status="awaiting_approval",
+                binding_id=None,
+                confidence="high",
+                evidence=["test"],
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                code = main(["--state-dir", tmpdir, "dismiss-event", inbox_item.event_id])
+
+            stored = store.get_event(inbox_item.event_id)
+            self.assertEqual(0, code)
+            self.assertIn("dismissed_event", output.getvalue())
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("user_dismissed", stored.delivery_status)
+
     def test_first_inferred_binding_requires_confirmation_before_delivery(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)

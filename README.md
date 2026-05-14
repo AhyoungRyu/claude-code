@@ -126,11 +126,21 @@ pr-watch confirm-binding evt_123 --no-mirror
 pr-watch confirm-binding evt_123 --conductor-db "$HOME/Library/Application Support/com.conductor.app/conductor.db"
 ```
 
+Reject a wrong candidate or dismiss one notification:
+
+```bash
+pr-watch reject-binding evt_123
+pr-watch dismiss-event evt_123
+```
+
 `confirm-binding` updates the active PR/session binding and returns the event to
 `pending` / `awaiting_approval` at high confidence. By default it mirrors the
 current event to Conductor immediately when a Conductor DB is available. It does
 not resume or queue the session unless `--trigger` is passed. Use `approve`
 when you are ready to deliver work to the confirmed session.
+`reject-binding` marks only the inferred session candidate as wrong and leaves
+the event pending for another match. `dismiss-event` closes that single PR Watch
+event without inspecting the PR or taking GitHub action.
 
 When Conductor host sync sees a high-confidence inferred or rebind candidate
 that still needs confirmation, it inserts a visible notification-only synthetic
@@ -141,6 +151,14 @@ unread. If the Conductor DB is unavailable, PR Watch falls back to the bundled
 `codex exec resume` notification prompt path. The prompt is separate from the
 final PR update, so confirming the event can still mirror the actual update
 afterward.
+
+Conductor prompts include concise suggested replies. Confirmation prompts offer
+`Confirm this session`, `Not this session`, and `Ignore this update`; confirmed
+update prompts offer `Inspect update`, `Queue for later`, and
+`Ignore this update`. PR Watch stores best-effort `suggested_replies` metadata
+for hosts that render clickable replies, and also includes the same choices as
+plain text so Codex, Claude Code, and terminal sessions still work when the host
+does not render native buttons.
 
 The same bridge is exposed through MCP as `host_status` and `sync_host_once`
 for hosts that can explicitly call MCP tools. These tools still do not make the
@@ -169,7 +187,8 @@ session-visible Conductor notifications because Conductor renders its own
 process. Use `host status` first when diagnosing the private DB surface.
 Mirroring is deduped per event/host target and ignores legacy hidden synthetic
 rows that lack a visible `turn_id`, so upgrading PR Watch can repair earlier
-hidden notifications without spamming once a visible turn exists.
+hidden notifications without spamming once a visible turn exists. It also
+repairs older visible PR Watch turns that predate the suggested-reply format.
 
 To make host sync automatic, reuse the existing launchd one-shot watcher and add
 `--host-sync`:
@@ -281,6 +300,26 @@ Confirm an inferred binding or active-handler rebind without delivery:
 }
 ```
 
+Reject a wrong session candidate or dismiss a single event:
+
+```json
+{
+  "tool": "reject_binding_for_event",
+  "arguments": {
+    "event_id": "evt_123"
+  }
+}
+```
+
+```json
+{
+  "tool": "dismiss_event",
+  "arguments": {
+    "event_id": "evt_123"
+  }
+}
+```
+
 Show and acknowledge in-app notifications:
 
 ```json
@@ -306,6 +345,8 @@ Useful MCP tools:
 | `check_pr_updates` | Poll GitHub once and record actionable PR events |
 | `show_pending_pr_actions` | Show events waiting for user approval or binding |
 | `confirm_binding_for_event` | Confirm or reassign the active PR/session binding without delivery |
+| `reject_binding_for_event` | Reject the inferred session candidate while keeping the event pending |
+| `dismiss_event` | Dismiss one event without inspecting the PR or taking GitHub action |
 | `approve_resume_session` | Approve delivery to the matched session |
 | `queue_resume_session` | Queue delivery without trying to run immediately |
 | `notify_prompt_session` | Send a guardrailed notification-only prompt to the confirmed bound session |

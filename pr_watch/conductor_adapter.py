@@ -30,6 +30,8 @@ REQUIRED_COLUMNS = {
     },
 }
 
+PROMPT_VERSION = "2"
+
 
 @dataclass(frozen=True)
 class ConductorStatus:
@@ -197,24 +199,17 @@ def _mirror_message_to_conductor(
 
 
 def render_conductor_message_turn(event: InboxItem) -> tuple[str, str]:
-    user_text = _render_notification_prompt(
-        event,
-        marker_label="Event id",
-        marker_value=event.event_id,
-        command="",
-    )
+    user_text = _render_update_user_prompt(event)
     assistant_text = "\n".join(
         [
-            "PR Watch update (synthetic, not user input)",
-            f"Event: {event.summary}",
-            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
-            f"Role: {event.role}",
-            f"Type: {event.event_type}",
-            f"Actor: {event.actor}",
-            f"GitHub: {event.pr_url}",
-            f"pr-watch:event_id={event.event_id}",
-            "This was inserted by the experimental local Conductor host bridge.",
-            "No action has been taken.",
+            f"PR #{event.pr_number} has a new actionable update in this bound session.",
+            "",
+            "Choose one:",
+            "- Inspect update: review the PR update now.",
+            "- Queue for later: keep it queued for this session.",
+            "- Ignore this update: dismiss this notification.",
+            "",
+            'I will not inspect the PR or touch GitHub unless you choose "Inspect update".',
         ]
     )
     return user_text, assistant_text
@@ -226,24 +221,17 @@ def render_conductor_message(event: InboxItem, session_id: str = "", message_id:
 
 
 def render_conductor_confirmation_turn(event: InboxItem) -> tuple[str, str]:
-    user_text = _render_notification_prompt(
-        event,
-        marker_label="Confirmation event id",
-        marker_value=event.event_id,
-        command=f"pr-watch confirm-binding {event.event_id}",
-    )
+    user_text = _render_confirmation_user_prompt(event)
     assistant_text = "\n".join(
         [
-            "PR Watch binding confirmation needed (synthetic, not user input)",
-            f"Confirm this session should handle PR #{event.pr_number}.",
-            f"Event: {event.summary}",
-            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
-            f"Role: {event.role}",
-            f"Type: {event.event_type}",
-            f"GitHub: {event.pr_url}",
-            f"pr-watch:confirm_event_id={event.event_id}",
-            "Use the pr-watch MCP tool confirm_binding_for_event for this event if this is the right session.",
-            "No PR inspection, GitHub action, file edit, comment, or push has been performed.",
+            f"I found a likely PR Watch session match for PR #{event.pr_number}.",
+            "",
+            "Choose one:",
+            "- Confirm this session: bind future updates here.",
+            "- Not this session: reject this match and keep the event pending.",
+            "- Ignore this update: dismiss this notification.",
+            "",
+            "I will not inspect the PR or touch GitHub from this notification.",
         ]
     )
     return user_text, assistant_text
@@ -260,36 +248,46 @@ def render_conductor_confirmation_message(event: InboxItem, session_id: str = ""
     )
 
 
-def _render_notification_prompt(
-    event: InboxItem,
-    marker_label: str,
-    marker_value: str,
-    command: str,
-) -> str:
-    lines = [
-        "PR Watch notification only.",
-        "",
-        f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
-        f"Event: {event.summary}",
-        f"Actor: {event.actor}",
-        f"Role: {event.role}",
-        f"Link: {event.pr_url}",
-        f"{marker_label}: {marker_value}",
-    ]
-    if command:
-        lines.append(f"Confirm command: {command}")
-        lines.append(f"pr-watch:confirm_event_id={marker_value}")
-    else:
-        lines.append(f"pr-watch:event_id={marker_value}")
-    lines.extend(
+def _render_confirmation_user_prompt(event: InboxItem) -> str:
+    return "\n".join(
         [
+            f"PR Watch: Is this the right session for PR #{event.pr_number}?",
             "",
-            "Do not inspect files/edit/comment unless user asks.",
-            "Do not run tools, call GitHub, edit code, post comments, push, or take external action yet.",
-            "Do not treat this as approval to work on the PR.",
+            f"{event.actor} requested attention on {event.repo_owner}/{event.repo_name}#{event.pr_number}.",
+            f"Event: {event.summary}",
+            f"Link: {event.pr_url}",
+            "",
+            "Suggested replies:",
+            "- Confirm this session",
+            "- Not this session",
+            "- Ignore this update",
+            "",
+            f"Event id: {event.event_id}",
+            f"pr-watch:confirm_event_id={event.event_id}",
+            f"pr-watch:prompt_version={PROMPT_VERSION}",
         ]
     )
-    return "\n".join(lines)
+
+
+def _render_update_user_prompt(event: InboxItem) -> str:
+    return "\n".join(
+        [
+            f"PR Watch: PR #{event.pr_number} has an update",
+            "",
+            f"{event.actor}: {event.summary}",
+            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
+            f"Link: {event.pr_url}",
+            "",
+            "Suggested replies:",
+            "- Inspect update",
+            "- Queue for later",
+            "- Ignore this update",
+            "",
+            f"Event id: {event.event_id}",
+            f"pr-watch:event_id={event.event_id}",
+            f"pr-watch:prompt_version={PROMPT_VERSION}",
+        ]
+    )
 
 
 def _render_assistant_payload(
@@ -299,6 +297,7 @@ def _render_assistant_payload(
     message_id: str = "",
     marker: Optional[dict[str, str]] = None,
 ) -> str:
+    suggested_replies = _suggested_replies_for_event(event)
     return json.dumps(
         {
             "type": "assistant",
@@ -307,9 +306,42 @@ def _render_assistant_payload(
                 "role": "assistant",
                 "content": [{"type": "text", "text": text}],
             },
+            "suggested_replies": suggested_replies,
+            "extended_message_payload": {
+                "suggested_replies": [
+                    {"text": item["label"], "value": item["message"]} for item in suggested_replies
+                ],
+            },
+            "pr_watch": {
+                "event_id": event.event_id,
+                "prompt_version": PROMPT_VERSION,
+            },
         },
         ensure_ascii=False,
     )
+
+
+def _suggested_replies_for_event(event: InboxItem) -> list[dict[str, str]]:
+    if event.status == "needs_confirmation":
+        return [
+            _suggested_reply("Confirm this session", event.event_id, "confirm_binding_for_event"),
+            _suggested_reply("Not this session", event.event_id, "reject_binding_for_event"),
+            _suggested_reply("Ignore this update", event.event_id, "dismiss_event"),
+        ]
+    return [
+        _suggested_reply("Inspect update", event.event_id, "approve_resume_session"),
+        _suggested_reply("Queue for later", event.event_id, "queue_resume_session"),
+        _suggested_reply("Ignore this update", event.event_id, "dismiss_event"),
+    ]
+
+
+def _suggested_reply(label: str, event_id: str, action: str) -> dict[str, str]:
+    return {
+        "label": label,
+        "message": label,
+        "event_id": event_id,
+        "action": action,
+    }
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -360,6 +392,11 @@ def _find_existing_visible_message_id(conn: sqlite3.Connection, session_id: str,
          and u.id = m.turn_id
         where m.session_id = ?
           and m.content like ?
+          and (
+            m.content like '%pr-watch:prompt_version=2%'
+            or m.content like '%"prompt_version": "2"%'
+            or m.content like '%"prompt_version":"2"%'
+          )
           and (
             (m.role = 'user' and m.turn_id = m.id)
             or (

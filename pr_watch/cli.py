@@ -33,6 +33,8 @@ from .state import StateStore
 from .util import normalize_repo_full_name
 from .workflow import confirm_binding_for_event as workflow_confirm_binding_for_event
 from .workflow import create_explicit_binding
+from .workflow import dismiss_event as workflow_dismiss_event
+from .workflow import reject_binding_for_event as workflow_reject_binding_for_event
 
 
 INIT_PROFILE_NOTIFICATION_MODES = {
@@ -97,6 +99,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"trigger\t{trigger_result.event_id}\t{trigger_result.action}")
                 if trigger_result.message:
                     print(trigger_result.message)
+            return 0
+        if args.command == "reject-binding":
+            store = StateStore(state_db_path(args.state_dir))
+            result = workflow_reject_binding_for_event(
+                store,
+                args.event_id,
+                session_id=args.session_id,
+            )
+            binding = result["binding"]
+            print(f"{result['action']}: {args.event_id}")
+            print(f"binding: {binding.agent}:{binding.session_id}")
+            return 0
+        if args.command == "dismiss-event":
+            store = StateStore(state_db_path(args.state_dir))
+            result = workflow_dismiss_event(store, args.event_id)
+            print(f"{result['action']}: {args.event_id}")
             return 0
         if args.command == "daemon":
             store = StateStore(state_db_path(args.state_dir))
@@ -310,6 +328,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--busy-policy",
         choices=["run_if_idle_queue_if_busy", "always_queue", "notify_only", "drop_if_busy", "ask_when_busy"],
     )
+
+    reject = subparsers.add_parser(
+        "reject-binding",
+        help="reject an inferred or rebind PR/session binding candidate without dismissing the event",
+    )
+    reject.add_argument("event_id")
+    reject.add_argument("--session-id", help="reject this session candidate for the event")
+
+    dismiss = subparsers.add_parser("dismiss-event", help="dismiss a PR watcher event without taking PR action")
+    dismiss.add_argument("event_id")
 
     approve = subparsers.add_parser("approve", help="approve delivery for an inbox event")
     approve.add_argument("event_id")

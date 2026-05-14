@@ -838,6 +838,7 @@ def _should_preserve_delivery_state(existing: InboxItem) -> bool:
         "awaiting_rebind_confirmation",
         "notify_only",
         "queued",
+        "session_candidate_rejected",
     }
     final_statuses = {"delivered", "dismissed", "dropped", "queued"}
     return existing.status in final_statuses or existing.delivery_status in user_decision_states

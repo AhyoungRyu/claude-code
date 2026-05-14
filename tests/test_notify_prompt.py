@@ -118,7 +118,7 @@ def create_conductor_db(path, session_id="conductor-session-1", claude_session_i
 
 
 class NotifyPromptTests(unittest.TestCase):
-    def test_render_notify_prompt_is_notification_only_and_contains_guardrails(self):
+    def test_render_notify_prompt_offers_suggested_replies_and_contains_guardrails(self):
         render_notify_prompt = getattr(delivery, "render_notify_prompt", None)
         self.assertIsNotNone(render_notify_prompt, "delivery.render_notify_prompt should exist")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,24 +127,26 @@ class NotifyPromptTests(unittest.TestCase):
 
             prompt = render_notify_prompt(event)
 
-        self.assertIn("PR Watch notification only.", prompt)
+        self.assertIn("PR Watch: PR #1049 has an update", prompt)
         self.assertIn("PR #1049", prompt)
         self.assertIn("sendbird/ai-agent-js", prompt)
         self.assertIn("teammate pushed new commits to PR #1049", prompt)
-        self.assertIn("Actor: teammate", prompt)
+        self.assertIn("teammate:", prompt)
         self.assertIn(PR_URL, prompt)
+        self.assertIn("Suggested replies:", prompt)
+        self.assertIn("Inspect update", prompt)
+        self.assertIn("Queue for later", prompt)
+        self.assertIn("Ignore this update", prompt)
         lower_prompt = prompt.lower()
         for forbidden in [
-            "do not run tools",
-            "inspect files",
-            "call github",
-            "edit code",
-            "post comments",
-            "push",
-            "external action",
+            "wait for the user's choice",
+            "inspecting files",
+            "calling github",
+            "editing",
+            "commenting",
+            "pushing",
         ]:
             self.assertIn(forbidden, lower_prompt)
-        self.assertIn("ask the user", lower_prompt)
         self.assertIn("inspect", lower_prompt)
 
     def test_notify_prompt_event_resumes_idle_session_without_finalizing_event(self):
@@ -166,7 +168,7 @@ class NotifyPromptTests(unittest.TestCase):
             self.assertEqual("notify_prompt_sent", result.action)
             self.assertEqual(1, len(runner.commands))
             self.assertEqual(["codex", "exec", "resume", "codex-confirmed"], runner.commands[0][:4])
-            self.assertIn("PR Watch notification only.", runner.commands[0][4])
+            self.assertIn("Suggested replies:", runner.commands[0][4])
             self.assertEqual("pending", stored.status)
             self.assertEqual("awaiting_approval", stored.delivery_status)
             self.assertEqual([], store.list_queue())
@@ -193,7 +195,7 @@ class NotifyPromptTests(unittest.TestCase):
             self.assertEqual([], runner.commands)
             self.assertEqual(1, len(queue))
             self.assertEqual(event.event_id, queue[0].event_id)
-            self.assertIn("PR Watch notification only.", queue[0].prompt)
+            self.assertIn("Suggested replies:", queue[0].prompt)
             self.assertEqual("pending", stored.status)
             self.assertEqual("awaiting_approval", stored.delivery_status)
 
@@ -345,7 +347,7 @@ class NotifyPromptTests(unittest.TestCase):
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
                 contents = [row[0] for row in conn.execute("select content from session_messages")]
             self.assertEqual(2, count)
-            self.assertTrue(any("PR Watch notification only." in content for content in contents))
+            self.assertTrue(any("Suggested replies:" in content for content in contents))
             self.assertTrue(any(f"pr-watch:event_id={event.event_id}" in content for content in contents))
             self.assertIsNotNone(store.get_host_sync(event.event_id, "conductor", "conductor-session-1"))
 

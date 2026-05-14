@@ -132,6 +132,59 @@ def confirm_binding_for_event(
     }
 
 
+def reject_binding_for_event(
+    store: StateStore,
+    event_id: str,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    event = store.get_event(event_id)
+    binding = binding_for_confirmation(store, event, session_id=session_id)
+    rejected = Binding(
+        binding_id=binding.binding_id,
+        repo_owner=binding.repo_owner,
+        repo_name=binding.repo_name,
+        pr_number=binding.pr_number,
+        pr_url=binding.pr_url,
+        role=binding.role,
+        agent=binding.agent,
+        session_id=binding.session_id,
+        cwd=binding.cwd,
+        branch=binding.branch,
+        host=binding.host,
+        confidence=binding.confidence,
+        confirmed=False,
+        active=False,
+        confirmation_source="user_rejected",
+        evidence=binding.evidence + [f"user rejected session candidate {binding.agent}:{binding.session_id}"],
+        created_at=binding.created_at,
+        last_event_at=binding.last_event_at,
+    )
+    rejected = store.upsert_binding(rejected)
+    updated = store.update_event(
+        event.event_id,
+        status="pending",
+        delivery_status="session_candidate_rejected",
+        binding_id="",
+        confidence="low",
+        evidence=event.evidence + [f"user rejected session candidate {binding.agent}:{binding.session_id}"],
+        recovery_command="",
+        error="User rejected the candidate session binding.",
+    )
+    return {"action": "rejected_binding", "event": updated, "binding": rejected}
+
+
+def dismiss_event(store: StateStore, event_id: str) -> Dict[str, Any]:
+    event = store.get_event(event_id)
+    updated = store.update_event(
+        event.event_id,
+        status="dismissed",
+        delivery_status="user_dismissed",
+        recovery_command="",
+        error="User dismissed this PR Watch event.",
+    )
+    return {"action": "dismissed_event", "event": updated}
+
+
 def binding_for_confirmation(
     store: StateStore,
     event: InboxItem,

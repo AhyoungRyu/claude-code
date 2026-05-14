@@ -239,20 +239,20 @@ def resume_command(binding: Binding, prompt: str, codex_binary: Optional[str] = 
 def render_notify_prompt(event: InboxItem) -> str:
     return "\n".join(
         [
-            "PR Watch notification only.",
+            f"PR Watch: PR #{event.pr_number} has an update",
             "",
-            f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
-            f"Event: {event.summary}",
-            f"Actor: {event.actor}",
-            f"Role: {event.role}",
+            f"{event.actor}: {event.summary}",
+            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
             f"Link: {event.pr_url}",
+            "",
+            "Suggested replies:",
+            "- Inspect update",
+            "- Queue for later",
+            "- Ignore this update",
+            "",
             f"Event id: {event.event_id}",
             "",
-            "Do not inspect files/edit/comment unless user asks.",
-            "Do not run tools, inspect files, call GitHub, edit code, post comments, push, "
-            "or take external action yet.",
-            "Do not treat this as approval to work on the PR.",
-            "Ask the user whether they want you to inspect it.",
+            "Wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
         ]
     )
 
@@ -260,21 +260,22 @@ def render_notify_prompt(event: InboxItem) -> str:
 def render_confirmation_prompt(event: InboxItem, binding: Binding) -> str:
     return "\n".join(
         [
-            "PR Watch notification only.",
+            f"PR Watch: Is this the right session for PR #{event.pr_number}?",
             "",
-            f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
+            f"{event.actor} requested attention on {event.repo_owner}/{event.repo_name}#{event.pr_number}.",
             f"Event: {event.summary}",
-            f"Actor: {event.actor}",
-            f"Role: {event.role}",
             f"Link: {event.pr_url}",
+            "",
+            "Suggested replies:",
+            "- Confirm this session",
+            "- Not this session",
+            "- Ignore this update",
+            "",
             f"Confirmation event id: {event.event_id}",
             f"Candidate session: {binding.agent}:{binding.session_id}",
             f"Confirm command: pr-watch confirm-binding {event.event_id}",
-            "Confirm action: use PR Watch confirm_binding_for_event for this event if this is the right session.",
             "",
-            "Do not inspect files/edit/comment unless user asks.",
-            "Do not run tools, call GitHub, edit code, post comments, push, or take external action yet.",
-            "Do not treat this as approval to work on the PR.",
+            "Wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
         ]
     )
 

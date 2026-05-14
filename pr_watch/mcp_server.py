@@ -15,6 +15,8 @@ from .sessions import discover_sessions
 from .state import StateStore
 from .workflow import confirm_binding_for_event as workflow_confirm_binding_for_event
 from .workflow import create_explicit_binding
+from .workflow import dismiss_event as workflow_dismiss_event
+from .workflow import reject_binding_for_event as workflow_reject_binding_for_event
 
 
 _DEFAULT_STATE_DIR: Optional[str] = None
@@ -127,6 +129,26 @@ def confirm_binding_for_event(
         session_state=session_state,
         busy_policy=busy_policy or config.get("busy_policy", "run_if_idle_queue_if_busy"),
     )
+    return _to_json(result)
+
+
+def reject_binding_for_event(
+    event_id: str,
+    session_id: Optional[str] = None,
+    state_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Reject an inferred PR/session binding candidate without dismissing the event."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = workflow_reject_binding_for_event(store, event_id, session_id=session_id)
+    return _to_json(result)
+
+
+def dismiss_event(event_id: str, state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Dismiss a PR watcher event without taking PR or GitHub action."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = workflow_dismiss_event(store, event_id)
     return _to_json(result)
 
 
@@ -315,6 +337,8 @@ def build_server() -> Any:
     server.tool()(show_pending_pr_actions)
     server.tool()(bind_pr)
     server.tool()(confirm_binding_for_event)
+    server.tool()(reject_binding_for_event)
+    server.tool()(dismiss_event)
     server.tool()(approve)
     server.tool()(approve_resume_session)
     server.tool()(queue_resume_session)
