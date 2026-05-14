@@ -24,6 +24,7 @@ from pr_watch.notifications import resolve_notification_mode
 from pr_watch.setup import detect_current_repo, parse_github_remote_url
 from pr_watch.sessions import discover_sessions
 from pr_watch.state import StateStore
+from pr_watch.util import stable_id
 from pr_watch.workflow import create_explicit_binding, route_event
 
 
@@ -329,6 +330,64 @@ class PrWatchTests(unittest.TestCase):
             [event.dedupe_key for event in second],
         )
 
+    def test_author_service_deploy_preview_comments_are_muted(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1058,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                "author": {"login": "irene"},
+                "comments": [
+                    {
+                        "id": "netlify-comment",
+                        "author": {"login": "netlify"},
+                        "body": "Deploy Preview for ai-agent-js is ready!",
+                        "authorAssociation": "NONE",
+                        "updatedAt": "2026-05-14T01:41:15Z",
+                    },
+                    {
+                        "id": "vercel-comment",
+                        "author": {"login": "vercel"},
+                        "body": "Preview Deployment is ready.",
+                        "authorAssociation": "NONE",
+                        "updatedAt": "2026-05-14T01:42:15Z",
+                    },
+                    {
+                        "id": "actions-comment",
+                        "author": {"login": "github-actions"},
+                        "body": "Workflow run completed.",
+                        "updatedAt": "2026-05-14T01:43:15Z",
+                    },
+                    {
+                        "id": "dependabot-comment",
+                        "author": {"login": "dependabot[bot]", "type": "Bot"},
+                        "body": "Bumps a dependency.",
+                        "updatedAt": "2026-05-14T01:44:15Z",
+                    },
+                    {
+                        "id": "renovate-comment",
+                        "author": {"login": "renovate[bot]", "type": "Bot"},
+                        "body": "Renovate update.",
+                        "updatedAt": "2026-05-14T01:45:15Z",
+                    },
+                    {
+                        "id": "human-comment",
+                        "author": {"login": "teammate"},
+                        "body": "Can you look at the failing test?",
+                        "authorAssociation": "MEMBER",
+                        "updatedAt": "2026-05-14T01:46:15Z",
+                    },
+                ],
+                "updatedAt": "2026-05-14T01:46:15Z",
+            },
+            current_user="irene",
+        )
+
+        comment_events = [event for event in events if event.event_type == "human_comment"]
+
+        self.assertEqual(["teammate"], [event.actor for event in comment_events])
+
     def test_blocked_merge_state_with_mergeable_pr_is_not_a_merge_conflict(self):
         events = classify_pr(
             {
@@ -458,6 +517,52 @@ class PrWatchTests(unittest.TestCase):
         )
 
         self.assertNotIn("linked_issue_comment", {event.event_type for event in events})
+
+    def test_linked_issue_service_comments_are_muted(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "url": PR_URL,
+                "author": {"login": "teammate"},
+                "latestReviews": [
+                    {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z",
+                    }
+                ],
+                "linkedIssues": [
+                    {
+                        "number": 321,
+                        "url": "https://github.com/sendbird/ai-agent-js/issues/321",
+                        "comments": [
+                            {
+                                "id": 79,
+                                "author": {"login": "netlify"},
+                                "body": "Deploy Preview for linked issue is ready!",
+                                "authorAssociation": "NONE",
+                                "updatedAt": "2026-05-11T11:00:00Z",
+                            },
+                            {
+                                "id": 80,
+                                "author": {"login": "teammate"},
+                                "body": "This needs a real follow-up.",
+                                "authorAssociation": "MEMBER",
+                                "updatedAt": "2026-05-11T11:01:00Z",
+                            },
+                        ],
+                    }
+                ],
+                "updatedAt": "2026-05-11T11:01:00Z",
+            },
+            current_user="irene",
+        )
+
+        linked_events = [event for event in events if event.event_type == "linked_issue_comment"]
+
+        self.assertEqual(["teammate"], [event.actor for event in linked_events])
 
     def test_explicit_bind_creates_confirmed_binding_used_as_high_confidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1491,6 +1596,76 @@ class PrWatchTests(unittest.TestCase):
             poll_once(store, "irene", repo="sendbird/ai-agent-js", fixture=str(fixture), sessions=[])
 
             stored = store.get_event(stale_conflict.event_id)
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("stale_pr_event_not_current", stored.delivery_status)
+            self.assertIn("no longer present in the current actionable PR state", stored.error)
+            self.assertEqual([], store.list_queue())
+
+    def test_poll_once_dismisses_stale_netlify_confirmation_when_comment_is_no_longer_actionable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1058,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                    "author": {"login": "irene"},
+                    "comments": [
+                      {
+                        "id": "netlify-comment",
+                        "author": {"login": "netlify"},
+                        "body": "Deploy Preview for ai-agent-js is ready!",
+                        "authorAssociation": "NONE",
+                        "updatedAt": "2026-05-14T01:41:15Z"
+                      }
+                    ],
+                    "updatedAt": "2026-05-14T01:41:15Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            stale_event = ClassifiedEvent(
+                pr=PullRequestRef(
+                    owner="sendbird",
+                    repo="ai-agent-js",
+                    number=1058,
+                    url="https://github.com/sendbird/ai-agent-js/pull/1058",
+                    title="PR 1058",
+                    head_ref="pr-1058",
+                ),
+                role="author",
+                event_type="human_comment",
+                summary="netlify commented on your PR #1058.",
+                actor="netlify",
+                actionable=True,
+                dedupe_key=stable_id(
+                    "sendbird/ai-agent-js",
+                    1058,
+                    "author",
+                    "human_comment",
+                    "netlify",
+                    "2026-05-14T01:41:15Z",
+                ),
+                payload={"comment_id": "netlify-comment"},
+            )
+            stale_confirmation = store.upsert_event(
+                stale_event,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=None,
+                confidence="high",
+                evidence=["old netlify deploy preview comment"],
+            )
+            store.enqueue(stale_confirmation.event_id, ["codex", "resume", "session", "prompt"], "prompt")
+
+            poll_once(store, "irene", repo="sendbird/ai-agent-js", fixture=str(fixture), sessions=[])
+
+            stored = store.get_event(stale_confirmation.event_id)
             self.assertEqual("dismissed", stored.status)
             self.assertEqual("stale_pr_event_not_current", stored.delivery_status)
             self.assertIn("no longer present in the current actionable PR state", stored.error)

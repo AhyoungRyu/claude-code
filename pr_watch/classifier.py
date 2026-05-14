@@ -6,6 +6,17 @@ from .models import ClassifiedEvent, PullRequestRef
 from .util import stable_id
 
 
+SERVICE_LOGINS = {
+    "github-actions",
+    "github-actions[bot]",
+    "netlify",
+    "netlify[bot]",
+    "vercel",
+    "vercel[bot]",
+}
+SERVICE_LOGIN_PREFIXES = ("dependabot", "renovate")
+
+
 def classify_pr(pr_data: Dict[str, Any], current_user: str) -> List[ClassifiedEvent]:
     pr = _pr_ref(pr_data)
     author = _login(pr_data.get("author"))
@@ -102,7 +113,7 @@ def _author_events(
 
     for comment in _items(pr_data.get("comments")):
         actor = _login(comment.get("author"))
-        if actor and actor != current_user and _is_human(actor):
+        if _is_actionable_human_comment(comment, current_user):
             yield _event(
                 pr,
                 role="author",
@@ -180,7 +191,7 @@ def _linked_issue_events(
         issue_title = str(issue.get("title") or "")
         for comment in _items(issue.get("comments")):
             actor = _login(comment.get("author"))
-            if not actor or actor == current_user or not _is_human(actor):
+            if not _is_actionable_human_comment(comment, current_user):
                 continue
             comment_id = comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
             occurred_at = str(comment.get("updatedAt") or comment.get("createdAt") or updated_at)
@@ -290,6 +301,62 @@ def _check_name(check: Dict[str, Any]) -> str:
     return str(check.get("name") or check.get("context") or check.get("workflowName") or "check")
 
 
+def _is_actionable_human_comment(comment: Dict[str, Any], current_user: str) -> bool:
+    actor = _login(comment.get("author"))
+    if not actor or actor == current_user:
+        return False
+    if _is_service_comment(comment, actor):
+        return False
+    return _is_human(actor)
+
+
+def _is_service_comment(comment: Dict[str, Any], login: str) -> bool:
+    return _is_service_login(login) or _is_bot_author(comment) or _is_deploy_preview_comment(comment, login)
+
+
+def _is_service_login(login: str) -> bool:
+    lowered = login.lower()
+    normalized = lowered.removesuffix("[bot]")
+    return (
+        lowered in SERVICE_LOGINS
+        or normalized in SERVICE_LOGINS
+        or any(lowered.startswith(prefix) or normalized.startswith(prefix) for prefix in SERVICE_LOGIN_PREFIXES)
+    )
+
+
+def _is_bot_author(comment: Dict[str, Any]) -> bool:
+    author = comment.get("author") if isinstance(comment.get("author"), dict) else {}
+    user = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+    values = [
+        author.get("type"),
+        author.get("__typename"),
+        comment.get("authorType"),
+        comment.get("type"),
+        user.get("type"),
+    ]
+    return any(str(value).lower() == "bot" for value in values if value)
+
+
+def _is_deploy_preview_comment(comment: Dict[str, Any], login: str) -> bool:
+    body = str(comment.get("body") or "").lower()
+    if not body:
+        return False
+    association = str(comment.get("authorAssociation") or comment.get("author_association") or "").upper()
+    service_like_author = _is_service_login(login) or _is_bot_author(comment) or association in {"NONE", "BOT"}
+    if not service_like_author:
+        return False
+    if "deploy preview" in body and ("ready" in body or "netlify" in body):
+        return True
+    if "preview deployment" in body and ("ready" in body or "vercel" in body):
+        return True
+    return False
+
+
 def _is_human(login: str) -> bool:
     lowered = login.lower()
-    return not (lowered.endswith("[bot]") or lowered.endswith("-bot") or lowered == "github-actions")
+    return not (
+        lowered.endswith("[bot]")
+        or lowered.endswith("-bot")
+        or lowered == "github-actions"
+        or _is_service_login(login)
+    )

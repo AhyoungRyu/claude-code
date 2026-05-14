@@ -483,9 +483,11 @@ candidates are still tied, the event stays in the inbox with
 `pr-watch` also treats comments on GitHub issues linked from a PR as actionable
 PR context. It follows GitHub's `closingIssuesReferences` plus issue references
 in the PR body, fetches issue comments with `gh api`, and stores new human
-comments as `linked_issue_comment` inbox events. Jira ticket updates are the
-same product shape, but need a separate authenticated Jira adapter before they
-can be polled safely.
+comments as `linked_issue_comment` inbox events. PR and linked issue comments
+from bot/service deploy preview accounts such as Netlify, Vercel, GitHub
+Actions, Dependabot, and Renovate are ignored so they do not become confirmation
+prompts. Jira ticket updates are the same product shape, but need a separate
+authenticated Jira adapter before they can be polled safely.
 
 ## Skills
 

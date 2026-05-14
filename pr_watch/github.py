@@ -114,11 +114,15 @@ def fetch_issue_comments(repo: str, issue_number: int) -> List[dict]:
     for comment in raw_comments:
         if not isinstance(comment, dict):
             continue
+        user = comment.get("user") or {}
+        if not isinstance(user, dict):
+            user = {}
         comments.append(
             {
                 "id": comment.get("id"),
                 "url": comment.get("html_url"),
-                "author": {"login": (comment.get("user") or {}).get("login")},
+                "author": {"login": user.get("login"), "type": user.get("type")},
+                "authorAssociation": comment.get("author_association") or comment.get("authorAssociation"),
                 "body": comment.get("body") or "",
                 "createdAt": comment.get("created_at") or "",
                 "updatedAt": comment.get("updated_at") or "",

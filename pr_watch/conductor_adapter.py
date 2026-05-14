@@ -231,7 +231,7 @@ def render_conductor_confirmation_turn(event: InboxItem) -> tuple[str, str]:
             "- Not this session: reject this match and keep the event pending.",
             "- Ignore this update: dismiss this notification.",
             "",
-            "I will not inspect the PR or touch GitHub from this notification.",
+            "I will wait for your choice before running tools or reading files.",
         ]
     )
     return user_text, assistant_text
@@ -263,6 +263,8 @@ def _render_confirmation_user_prompt(event: InboxItem) -> str:
             "- Ignore this update",
             "",
             f"Event id: {event.event_id}",
+            "",
+            "Do not run tools or read files unless the user chooses Confirm this session; wait for one of the suggested replies.",
             f"pr-watch:confirm_event_id={event.event_id}",
             f"pr-watch:prompt_version={PROMPT_VERSION}",
         ]

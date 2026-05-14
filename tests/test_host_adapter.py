@@ -495,6 +495,8 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("Not this session", user_content)
             self.assertIn("Ignore this update", user_content)
             self.assertNotIn("No PR inspection", user_content)
+            self.assertIn("Do not run tools or read files", user_content)
+            self.assertIn("unless the user chooses Confirm this session", user_content)
             self.assertIn("pr-watch:prompt_version=2", user_content)
             payload = json.loads(assistant_content)
             labels = [item["label"] for item in payload["suggested_replies"]]
@@ -502,7 +504,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("2", payload["pr_watch"]["prompt_version"])
             assistant_text = payload["message"]["content"][0]["text"]
             self.assertIn("I found a likely PR Watch session match", assistant_text)
-            self.assertIn("I will not inspect the PR or touch GitHub", assistant_text)
+            self.assertIn("I will wait for your choice before running tools or reading files", assistant_text)
 
     def test_conductor_confirmed_update_turn_has_inspection_replies(self):
         with tempfile.TemporaryDirectory() as tmpdir:

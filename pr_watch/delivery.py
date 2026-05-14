@@ -252,7 +252,7 @@ def render_notify_prompt(event: InboxItem) -> str:
             "",
             f"Event id: {event.event_id}",
             "",
-            "Wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
+            "Do not run tools or read files unless the user chooses Inspect update; wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
         ]
     )
 
@@ -275,7 +275,7 @@ def render_confirmation_prompt(event: InboxItem, binding: Binding) -> str:
             f"Candidate session: {binding.agent}:{binding.session_id}",
             f"Confirm command: pr-watch confirm-binding {event.event_id}",
             "",
-            "Wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
+            "Do not run tools or read files unless the user chooses Confirm this session; wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
         ]
     )
 

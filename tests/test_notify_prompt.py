@@ -149,6 +149,43 @@ class NotifyPromptTests(unittest.TestCase):
             self.assertIn(forbidden, lower_prompt)
         self.assertIn("inspect", lower_prompt)
 
+    def test_render_confirmation_prompt_tells_agent_to_wait_without_tools_or_file_reads(self):
+        render_confirmation_prompt = getattr(delivery, "render_confirmation_prompt", None)
+        self.assertIsNotNone(render_confirmation_prompt, "delivery.render_confirmation_prompt should exist")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                active=False,
+                confidence="high",
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = store.upsert_event(
+                make_event(),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=binding.binding_id,
+                confidence="high",
+                evidence=["candidate binding matched this PR and role"],
+            )
+
+            prompt = render_confirmation_prompt(event, binding)
+
+        self.assertIn("Suggested replies:", prompt)
+        self.assertIn("Confirm this session", prompt)
+        self.assertIn("Not this session", prompt)
+        self.assertIn("Ignore this update", prompt)
+        self.assertIn("Do not run tools or read files", prompt)
+        self.assertIn("unless the user chooses Confirm this session", prompt)
+
     def test_notify_prompt_event_resumes_idle_session_without_finalizing_event(self):
         notify_prompt_event = getattr(delivery, "notify_prompt_event", None)
         self.assertIsNotNone(notify_prompt_event, "delivery.notify_prompt_event should exist")
