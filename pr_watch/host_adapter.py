@@ -10,7 +10,8 @@ from .conductor_adapter import (
     mirror_confirmation_to_conductor,
     mirror_event_to_conductor,
 )
-from .delivery import DEFAULT_BUSY_POLICY, approve_event, notify_prompt_event
+from .delivery import DEFAULT_BUSY_POLICY, approve_event, confirmation_prompt_event, notify_prompt_event
+from .host_integration import CONDUCTOR_CODEX_BINARY
 from .models import Binding, InboxItem
 from .state import StateStore
 
@@ -81,7 +82,16 @@ def sync_once(
     host_results: List[HostEventResult] = []
 
     if "conductor" in selected_hosts:
-        host_results.extend(_sync_conductor(store, events, conductor_db_path))
+        host_results.extend(
+            _sync_conductor(
+                store,
+                events,
+                conductor_db_path,
+                runner=runner,
+                session_state=session_state,
+                notify_prompt_confirmed=notify_prompt_confirmed,
+            )
+        )
 
     mirrored_event_ids = {
         item.event_id
@@ -110,6 +120,7 @@ def sync_once(
                 mirrored_event_ids=mirrored_event_ids,
                 runner=runner,
                 session_state=session_state,
+                selected_hosts=selected_hosts,
             )
         )
 
@@ -136,23 +147,37 @@ def _sync_conductor(
     store: StateStore,
     events: Iterable[InboxItem],
     conductor_db_path: Optional[str | Path],
+    runner: Optional[object],
+    session_state: str,
+    notify_prompt_confirmed: bool,
 ) -> List[HostEventResult]:
     results: List[HostEventResult] = []
     conductor_status = check_conductor_db(conductor_db_path)
-    if not conductor_status.available:
-        return [
-            HostEventResult(
-                host="conductor",
-                event_id="",
-                action=conductor_status.status,
-                message=conductor_status.message,
-            )
-        ]
+    reported_unavailable = False
 
     for event in events:
         binding = store.get_binding(event.binding_id)
         if _needs_binding_confirmation(event, binding):
             assert binding is not None
+            delivered = confirmation_prompt_event(
+                store,
+                event.event_id,
+                runner=runner,
+                session_state=session_state,
+                codex_binary=_conductor_codex_binary(),
+            )
+            if delivered.action != "confirmation_prompt_skipped":
+                results.append(
+                    HostEventResult(
+                        host="conductor",
+                        event_id=event.event_id,
+                        action=delivered.action,
+                        target_id=binding.session_id,
+                        message=delivered.message,
+                    )
+                )
+                continue
+
             existing = store.get_host_sync(event.event_id, "conductor_confirmation", binding.session_id)
             if existing:
                 continue
@@ -177,7 +202,21 @@ def _sync_conductor(
             continue
         if not _has_confirmed_binding(event, binding):
             continue
+        if notify_prompt_confirmed and _is_confirmed_trigger_candidate(event, binding):
+            continue
         assert binding is not None
+        if not conductor_status.available:
+            if not reported_unavailable:
+                results.append(
+                    HostEventResult(
+                        host="conductor",
+                        event_id="",
+                        action=conductor_status.status,
+                        message=conductor_status.message,
+                    )
+                )
+                reported_unavailable = True
+            continue
         existing = store.get_host_sync(event.event_id, "conductor", binding.session_id)
         if existing:
             results.append(
@@ -242,16 +281,19 @@ def _notify_prompt_confirmed_events(
     mirrored_event_ids: set[str],
     runner: Optional[object],
     session_state: str,
+    selected_hosts: set[str],
 ) -> List[HostTriggerResult]:
     results: List[HostTriggerResult] = []
     for event in events:
         if event.event_id in mirrored_event_ids:
             continue
+        binding = store.get_binding(event.binding_id)
         delivery = notify_prompt_event(
             store,
             event.event_id,
             runner=runner,
             session_state=session_state,
+            codex_binary=_notify_prompt_codex_binary(binding, selected_hosts),
         )
         if delivery.action == "notify_prompt_skipped":
             continue
@@ -288,3 +330,15 @@ def _is_confirmed_trigger_candidate(event: InboxItem, binding: Optional[Binding]
         and binding is not None
         and binding.confidence == "high"
     )
+
+
+def _conductor_codex_binary() -> str:
+    return str(CONDUCTOR_CODEX_BINARY) if Path(CONDUCTOR_CODEX_BINARY).expanduser().exists() else "codex"
+
+
+def _notify_prompt_codex_binary(binding: Optional[Binding], selected_hosts: set[str]) -> Optional[str]:
+    if binding is None or binding.agent != "codex" or "conductor" not in selected_hosts:
+        return None
+    if selected_hosts == {"conductor"} or binding.host == "conductor":
+        return _conductor_codex_binary()
+    return None

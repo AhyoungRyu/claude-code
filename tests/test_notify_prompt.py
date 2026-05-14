@@ -6,6 +6,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from pr_watch import delivery
 from pr_watch.cli import main
@@ -163,8 +164,8 @@ class NotifyPromptTests(unittest.TestCase):
 
             self.assertEqual("notify_prompt_sent", result.action)
             self.assertEqual(1, len(runner.commands))
-            self.assertEqual(["codex", "resume", "codex-confirmed"], runner.commands[0][:3])
-            self.assertIn("PR Watch notification only.", runner.commands[0][3])
+            self.assertEqual(["codex", "exec", "resume", "codex-confirmed"], runner.commands[0][:4])
+            self.assertIn("PR Watch notification only.", runner.commands[0][4])
             self.assertEqual("pending", stored.status)
             self.assertEqual("awaiting_approval", stored.delivery_status)
             self.assertEqual([], store.list_queue())
@@ -311,7 +312,7 @@ class NotifyPromptTests(unittest.TestCase):
             self.assertEqual("resume failed", result.notify_prompt_results[0].message)
             self.assertEqual("pending", store.get_event(event.event_id).status)
 
-    def test_host_sync_does_not_soft_trigger_when_conductor_mirror_succeeds(self):
+    def test_host_sync_notify_prompt_confirmed_uses_conductor_codex_before_db_mirror(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conductor.sqlite"
             create_conductor_db(db_path)
@@ -322,21 +323,32 @@ class NotifyPromptTests(unittest.TestCase):
                 host="conductor",
             )
             runner = RecordingRunner()
+            conductor_codex = Path(tmpdir) / "conductor-codex"
+            conductor_codex.write_text("#!/bin/sh\n", encoding="utf-8")
 
             self.assertIn("notify_prompt_confirmed", inspect.signature(sync_once).parameters)
-            result = sync_once(
-                store,
-                hosts=["conductor"],
-                conductor_db_path=db_path,
-                notify_prompt_confirmed=True,
-                runner=runner,
-                session_state="idle",
-            )
+            with patch("pr_watch.host_adapter.CONDUCTOR_CODEX_BINARY", conductor_codex, create=True):
+                result = sync_once(
+                    store,
+                    hosts=["conductor"],
+                    conductor_db_path=db_path,
+                    notify_prompt_confirmed=True,
+                    runner=runner,
+                    session_state="idle",
+                )
 
-            self.assertEqual(["mirrored"], [item.action for item in result.host_results])
-            self.assertEqual([], result.notify_prompt_results)
-            self.assertEqual([], runner.commands)
-            self.assertIsNone(store.get_host_sync(event.event_id, "notify_prompt", "conductor-session-1"))
+            self.assertEqual([], result.host_results)
+            self.assertEqual(["notify_prompt_sent"], [item.action for item in result.notify_prompt_results])
+            self.assertEqual(1, len(runner.commands))
+            self.assertEqual([str(conductor_codex), "exec", "resume", "conductor-session-1"], runner.commands[0][:4])
+            prompt = runner.commands[0][4]
+            self.assertIn("PR Watch notification only.", prompt)
+            self.assertIn("Do not inspect files/edit/comment unless user asks.", prompt)
+            self.assertIn(f"Event id: {event.event_id}", prompt)
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(0, count)
+            self.assertIsNotNone(store.get_host_sync(event.event_id, "notify_prompt", "conductor-session-1"))
 
     def test_cli_notify_prompt_queues_soft_prompt_without_external_resume_when_state_unknown(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -449,6 +461,47 @@ class NotifyPromptTests(unittest.TestCase):
             ],
             payload["ProgramArguments"],
         )
+
+    def test_launchd_plist_keeps_prompt_session_state_for_conductor_confirmation_prompts(self):
+        from pr_watch.service import build_launchd_plist
+
+        plist = build_launchd_plist(
+            label="com.example.pr-watch.test",
+            python_executable="/opt/pr-watch/bin/python",
+            state_dir="/tmp/pr-watch-state",
+            interval_seconds=120,
+            stdout_path="/tmp/pr-watch.out.log",
+            stderr_path="/tmp/pr-watch.err.log",
+            host_sync=True,
+            host="conductor",
+            notify_prompt_session_state="unknown",
+        )
+
+        payload = plistlib.loads(plist.encode("utf-8"))
+
+        self.assertIn("--notify-prompt-session-state", payload["ProgramArguments"])
+        self.assertEqual(
+            "unknown",
+            payload["ProgramArguments"][payload["ProgramArguments"].index("--notify-prompt-session-state") + 1],
+        )
+
+    def test_service_host_sync_message_counts_confirmation_prompt_results(self):
+        from pr_watch.host_adapter import HostEventResult
+        from pr_watch.service import _host_sync_message
+
+        message = _host_sync_message(
+            [
+                HostEventResult(
+                    host="conductor",
+                    event_id="evt_123",
+                    action="confirmation_prompt_sent",
+                    target_id="session-1",
+                )
+            ],
+            trigger_count=0,
+        )
+
+        self.assertIn("confirmation_prompted=1", message)
 
 
 if __name__ == "__main__":

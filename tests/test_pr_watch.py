@@ -1481,7 +1481,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("failed", result.action)
             self.assertEqual("pending", stored.status)
             self.assertEqual("failed", stored.delivery_status)
-            self.assertIn("codex resume codex-abc", stored.recovery_command)
+            self.assertIn("codex exec resume codex-abc", stored.recovery_command)
             self.assertIn("session not found", stored.error)
 
     def test_cli_bind_poll_inbox_and_approve_queue_flow(self):

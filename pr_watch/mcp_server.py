@@ -270,7 +270,7 @@ def sync_host_once(
     busy_policy: Optional[str] = None,
     state_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Mirror pending events to local host surfaces and optionally trigger confirmed bindings."""
+    """Sync pending events to local host sessions/surfaces and optionally trigger confirmed bindings."""
     state_dir = _effective_state_dir(state_dir)
     config = load_config(state_dir)
     store = StateStore(state_db_path(state_dir))

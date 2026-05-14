@@ -130,6 +130,7 @@ def build_launchd_plist(
             program_arguments.append("--trigger-confirmed")
         if notify_prompt_confirmed:
             program_arguments.append("--notify-prompt-confirmed")
+        if notify_prompt_confirmed or notify_prompt_session_state != "idle":
             program_arguments.extend(["--notify-prompt-session-state", notify_prompt_session_state])
 
     payload = {
@@ -382,15 +383,20 @@ def _host_sync_message(host_results: list[object], trigger_count: int, notify_pr
     already_confirmations = sum(
         1 for item in host_results if getattr(item, "action", "") == "confirmation_already_requested"
     )
+    confirmation_prompts = sum(
+        1 for item in host_results if str(getattr(item, "action", "")).startswith("confirmation_prompt_")
+    )
     failed = sum(
         1
         for item in host_results
         if getattr(item, "action", "") in {"failed", "missing", "schema_mismatch", "unavailable"}
+        or getattr(item, "action", "") == "confirmation_prompt_failed"
     )
     return (
         f"host sync: mirrored={mirrored} confirmation_requested={confirmations} "
         f"already_synced={already} confirmation_already_requested={already_confirmations} "
-        f"failed={failed} triggered={trigger_count} notify_prompted={notify_prompt_count}"
+        f"confirmation_prompted={confirmation_prompts} failed={failed} "
+        f"triggered={trigger_count} notify_prompted={notify_prompt_count}"
     )
 
 

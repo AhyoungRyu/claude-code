@@ -474,11 +474,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service.set_defaults(command="service")
 
-    host = subparsers.add_parser("host", help="sync pending events into local host surfaces")
+    host = subparsers.add_parser("host", help="sync pending events into local host sessions and surfaces")
     host_sub = host.add_subparsers(dest="host_command")
     host_status_parser = host_sub.add_parser("status", help="show host bridge support and diagnostics")
     host_status_parser.add_argument("--conductor-db", help="override Conductor SQLite DB path")
-    host_sync = host_sub.add_parser("sync-once", help="mirror pending events to host surfaces once")
+    host_sync = host_sub.add_parser("sync-once", help="sync pending events to host sessions and surfaces once")
     host_sync.add_argument("--host", choices=["all", "conductor", "codex-app"], default="all")
     host_sync.add_argument("--conductor-db", help="override Conductor SQLite DB path")
     host_sync.add_argument(

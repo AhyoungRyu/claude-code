@@ -11,6 +11,7 @@ from .util import shell_join
 
 DEFAULT_BUSY_POLICY = "run_if_idle_queue_if_busy"
 NOTIFY_PROMPT_HOST = "notify_prompt"
+CONFIRMATION_PROMPT_HOST = "conductor_confirmation_prompt"
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ def notify_prompt_event(
     event_id: str,
     session_state: str = "unknown",
     runner: Optional[object] = None,
+    codex_binary: Optional[str] = None,
 ) -> DeliveryResult:
     event = store.get_event(event_id)
     binding = store.get_binding(event.binding_id)
@@ -135,7 +137,7 @@ def notify_prompt_event(
         )
 
     prompt = render_notify_prompt(event)
-    command = resume_command(binding, prompt)
+    command = resume_command(binding, prompt, codex_binary=codex_binary)
     normalized_state = session_state if session_state in {"idle", "working", "unknown"} else "unknown"
     if normalized_state != "idle":
         store.enqueue(event_id, command, prompt)
@@ -151,6 +153,47 @@ def notify_prompt_event(
     error = result.stderr.strip() or result.stdout.strip() or f"resume command exited {result.returncode}"
     store.upsert_host_sync(event_id, NOTIFY_PROMPT_HOST, binding.session_id, "failed", error=error)
     return DeliveryResult("notify_prompt_failed", event_id, command=command, message=error)
+
+
+def confirmation_prompt_event(
+    store: StateStore,
+    event_id: str,
+    session_state: str = "unknown",
+    runner: Optional[object] = None,
+    codex_binary: Optional[str] = None,
+) -> DeliveryResult:
+    event = store.get_event(event_id)
+    binding = store.get_binding(event.binding_id)
+    skip_reason = confirmation_prompt_skip_reason(event, binding)
+    if skip_reason:
+        return DeliveryResult("confirmation_prompt_skipped", event_id, message=skip_reason)
+
+    assert binding is not None
+    existing = store.get_host_sync(event.event_id, CONFIRMATION_PROMPT_HOST, binding.session_id)
+    if existing and existing.status != "failed":
+        return DeliveryResult(
+            _confirmation_prompt_dedupe_action(existing.status),
+            event_id,
+            message="confirmation prompt already recorded for this event/session",
+        )
+
+    prompt = render_confirmation_prompt(event, binding)
+    command = resume_command(binding, prompt, codex_binary=codex_binary)
+    normalized_state = session_state if session_state in {"idle", "working", "unknown"} else "unknown"
+    if normalized_state != "idle":
+        store.enqueue(event_id, command, prompt)
+        store.upsert_host_sync(event_id, CONFIRMATION_PROMPT_HOST, binding.session_id, "queued")
+        return DeliveryResult("confirmation_prompt_queued", event_id, command=command)
+
+    actual_runner = runner or SubprocessRunner()
+    result = actual_runner.run(command)
+    if result.returncode == 0:
+        store.upsert_host_sync(event_id, CONFIRMATION_PROMPT_HOST, binding.session_id, "sent")
+        return DeliveryResult("confirmation_prompt_sent", event_id, command=command)
+
+    error = result.stderr.strip() or result.stdout.strip() or f"resume command exited {result.returncode}"
+    store.upsert_host_sync(event_id, CONFIRMATION_PROMPT_HOST, binding.session_id, "failed", error=error)
+    return DeliveryResult("confirmation_prompt_failed", event_id, command=command, message=error)
 
 
 def notify_prompt_skip_reason(event: InboxItem, binding: Optional[Binding]) -> str:
@@ -169,11 +212,27 @@ def notify_prompt_skip_reason(event: InboxItem, binding: Optional[Binding]) -> s
     return ""
 
 
-def resume_command(binding: Binding, prompt: str) -> List[str]:
+def confirmation_prompt_skip_reason(event: InboxItem, binding: Optional[Binding]) -> str:
+    if event.status != "needs_confirmation":
+        return "confirmation prompt requires a needs_confirmation event"
+    if event.delivery_status not in {"awaiting_first_binding_confirmation", "awaiting_rebind_confirmation"}:
+        return "confirmation prompt requires a binding-confirmation delivery status"
+    if event.confidence != "high":
+        return "confirmation prompt requires a high-confidence event"
+    if binding is None or event.binding_id != binding.binding_id:
+        return "confirmation prompt requires a candidate session binding"
+    if binding.confirmed:
+        return "confirmation prompt is only for unconfirmed candidate bindings"
+    if binding.confidence != "high":
+        return "confirmation prompt requires a high-confidence binding"
+    return ""
+
+
+def resume_command(binding: Binding, prompt: str, codex_binary: Optional[str] = None) -> List[str]:
     if binding.agent == "claude":
         return ["claude", "--resume", binding.session_id, prompt]
     if binding.agent == "codex":
-        return ["codex", "resume", binding.session_id, prompt]
+        return [codex_binary or "codex", "exec", "resume", binding.session_id, prompt]
     raise ValueError(f"unsupported agent: {binding.agent}")
 
 
@@ -185,12 +244,37 @@ def render_notify_prompt(event: InboxItem) -> str:
             f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
             f"Event: {event.summary}",
             f"Actor: {event.actor}",
+            f"Role: {event.role}",
             f"Link: {event.pr_url}",
+            f"Event id: {event.event_id}",
             "",
+            "Do not inspect files/edit/comment unless user asks.",
             "Do not run tools, inspect files, call GitHub, edit code, post comments, push, "
             "or take external action yet.",
             "Do not treat this as approval to work on the PR.",
             "Ask the user whether they want you to inspect it.",
+        ]
+    )
+
+
+def render_confirmation_prompt(event: InboxItem, binding: Binding) -> str:
+    return "\n".join(
+        [
+            "PR Watch notification only.",
+            "",
+            f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
+            f"Event: {event.summary}",
+            f"Actor: {event.actor}",
+            f"Role: {event.role}",
+            f"Link: {event.pr_url}",
+            f"Confirmation event id: {event.event_id}",
+            f"Candidate session: {binding.agent}:{binding.session_id}",
+            f"Confirm command: pr-watch confirm-binding {event.event_id}",
+            "Confirm action: use PR Watch confirm_binding_for_event for this event if this is the right session.",
+            "",
+            "Do not inspect files/edit/comment unless user asks.",
+            "Do not run tools, call GitHub, edit code, post comments, push, or take external action yet.",
+            "Do not treat this as approval to work on the PR.",
         ]
     )
 
@@ -220,3 +304,11 @@ def _notify_prompt_dedupe_action(status: str) -> str:
     if status == "queued":
         return "notify_prompt_already_queued"
     return "notify_prompt_already_attempted"
+
+
+def _confirmation_prompt_dedupe_action(status: str) -> str:
+    if status == "sent":
+        return "confirmation_prompt_already_sent"
+    if status == "queued":
+        return "confirmation_prompt_already_queued"
+    return "confirmation_prompt_already_attempted"

@@ -140,14 +140,14 @@ def _mirror_message_to_conductor(
 
             message_id = str(uuid.uuid4())
             created_at = utc_now()
-            content = content_factory(event, session_id=session_id, message_id=message_id)
+            content = content_factory(event, session_id=binding.session_id, message_id=message_id)
             conn.execute(
                 """
                 insert into session_messages (
-                  id, session_id, role, content, created_at
-                ) values (?, ?, 'assistant', ?, ?)
+                  id, session_id, role, content, created_at, sent_at
+                ) values (?, ?, 'assistant', ?, ?, ?)
                 """,
-                (message_id, session_id, content, created_at),
+                (message_id, session_id, content, created_at, created_at),
             )
             conn.execute(
                 """
@@ -222,29 +222,11 @@ def _render_assistant_payload(
     return json.dumps(
         {
             "type": "assistant",
+            "session_id": session_id,
             "message": {
-                "id": message_id or f"pr-watch-{event.event_id}",
-                "container": None,
-                "model": "<synthetic>",
                 "role": "assistant",
-                "stop_details": None,
-                "stop_reason": "stop_sequence",
-                "stop_sequence": "",
-                "type": "message",
-                "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
-                    "service_tier": None,
-                },
                 "content": [{"type": "text", "text": text}],
             },
-            "parent_tool_use_id": None,
-            "session_id": session_id,
-            "uuid": message_id or event.event_id,
-            "pr_watch": marker or {"event_id": event.event_id},
         },
         ensure_ascii=False,
     )
