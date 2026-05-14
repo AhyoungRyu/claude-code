@@ -150,7 +150,9 @@ available. The synthetic turn has a native user row plus assistant row sharing a
 unread. If the Conductor DB is unavailable, PR Watch falls back to the bundled
 `codex exec resume` notification prompt path. The prompt is separate from the
 final PR update, so confirming the event can still mirror the actual update
-afterward.
+afterward. Visible host prompts are one-shot per event/session; unanswered
+prompts remain pending and inbox-only until the user explicitly confirms,
+rejects, dismisses, or approves them.
 
 Conductor prompts include concise suggested replies. Confirmation prompts offer
 `Confirm this session`, `Not this session`, and `Ignore this update`; confirmed

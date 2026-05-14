@@ -116,6 +116,22 @@ def create_conductor_db(path, session_id="conductor-session-1", claude_session_i
         )
 
 
+def add_conductor_session(path, session_id, claude_session_id=None, workspace_id=None):
+    workspace_id = workspace_id or f"workspace-{session_id}"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "insert into workspaces (id, active_session_id, unread) values (?, ?, 0)",
+            (workspace_id, session_id),
+        )
+        conn.execute(
+            """
+            insert into sessions (id, claude_session_id, unread_count, workspace_id)
+            values (?, ?, 0, ?)
+            """,
+            (session_id, claude_session_id, workspace_id),
+        )
+
+
 class HostAdapterTests(unittest.TestCase):
     def test_conductor_status_reports_missing_and_available_db(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -494,6 +510,159 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual(2, len(rows))
             self.assertTrue(any("Suggested replies:" in row[0] for row in rows))
             self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in row[0] for row in rows))
+
+    def test_host_sync_does_not_remirror_confirmation_when_host_sync_exists_without_visible_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+            store.upsert_host_sync(
+                event.event_id,
+                "conductor_confirmation",
+                candidate.session_id,
+                "confirmation_requested",
+                external_id="legacy-visible-turn",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["confirmation_already_requested"], [item.action for item in result.host_results])
+            self.assertEqual("needs_confirmation", store.get_event(event.event_id).status)
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(0, count)
+
+    def test_host_sync_does_not_remirror_legacy_confirmation_prompt_when_host_sync_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+            marker = f"pr-watch:confirm_event_id={event.event_id}"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    insert into session_messages (
+                      id, session_id, role, content, created_at, sent_at, turn_id, queue_order
+                    ) values (
+                      'legacy-confirmation-turn', 'conductor-session-1', 'user', ?,
+                      '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z',
+                      'legacy-confirmation-turn', 1
+                    )
+                    """,
+                    (f"PR Watch confirmation.\n{marker}\npr-watch:prompt_version=1",),
+                )
+                conn.execute(
+                    """
+                    insert into session_messages (
+                      id, session_id, role, content, created_at, sent_at, turn_id
+                    ) values (
+                      'legacy-confirmation-assistant', 'conductor-session-1', 'assistant', ?,
+                      '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z',
+                      'legacy-confirmation-turn'
+                    )
+                    """,
+                    (json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": marker}]}}),),
+                )
+            store.upsert_host_sync(
+                event.event_id,
+                "conductor_confirmation",
+                candidate.session_id,
+                "confirmation_requested",
+                external_id="legacy-confirmation-turn",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["confirmation_already_requested"], [item.action for item in result.host_results])
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(2, count)
+
+    def test_host_sync_allows_confirmation_prompt_for_new_candidate_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path, session_id="conductor-session-1")
+            add_conductor_session(db_path, "conductor-session-2")
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-2",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="rebind_candidate",
+                evidence=["new candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_rebind_confirmation",
+            )
+            store.upsert_host_sync(
+                event.event_id,
+                "conductor_confirmation",
+                "conductor-session-1",
+                "confirmation_requested",
+                external_id="old-confirmation-turn",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["confirmation_requested"], [item.action for item in result.host_results])
+            self.assertIsNotNone(
+                store.get_host_sync(event.event_id, "conductor_confirmation", "conductor-session-2")
+            )
+            with sqlite3.connect(db_path) as conn:
+                sessions = conn.execute(
+                    "select distinct session_id from session_messages order by session_id"
+                ).fetchall()
+            self.assertEqual([("conductor-session-2",)], sessions)
 
     def test_conductor_confirmation_turn_has_clear_replies_and_button_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -159,6 +159,30 @@ def _sync_conductor(
         binding = store.get_binding(event.binding_id)
         if _needs_binding_confirmation(event, binding):
             assert binding is not None
+            existing_confirmation = store.get_host_sync(
+                event.event_id,
+                "conductor_confirmation",
+                binding.session_id,
+            )
+            if existing_confirmation is not None:
+                store.upsert_host_sync(
+                    event.event_id,
+                    "conductor_confirmation",
+                    binding.session_id,
+                    "confirmation_already_requested",
+                    external_id=existing_confirmation.external_id,
+                    error=existing_confirmation.error,
+                )
+                results.append(
+                    HostEventResult(
+                        host="conductor",
+                        event_id=event.event_id,
+                        action="confirmation_already_requested",
+                        target_id=binding.session_id,
+                        message="binding confirmation request already recorded; leaving event pending in inbox",
+                    )
+                )
+                continue
             if conductor_status.available:
                 mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
                 if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
