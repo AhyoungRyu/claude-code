@@ -133,12 +133,14 @@ not resume or queue the session unless `--trigger` is passed. Use `approve`
 when you are ready to deliver work to the confirmed session.
 
 When Conductor host sync sees a high-confidence inferred or rebind candidate
-that still needs confirmation, it resumes or queues a short notification-only
-confirmation prompt into the candidate session through Conductor's bundled
-`codex exec resume` path when available. The CLI default `--session-state unknown`
-queues the prompt; pass `--session-state idle` for an immediate resume. The
-prompt is separate from the final PR update, so confirming the event can still
-mirror the actual update afterward.
+that still needs confirmation, it inserts a visible notification-only synthetic
+turn into the matched Conductor session when the Conductor SQLite surface is
+available. The synthetic turn has a native user row plus assistant row sharing a
+`turn_id`, so Conductor renders it in the transcript and marks the session
+unread. If the Conductor DB is unavailable, PR Watch falls back to the bundled
+`codex exec resume` notification prompt path. The prompt is separate from the
+final PR update, so confirming the event can still mirror the actual update
+afterward.
 
 The same bridge is exposed through MCP as `host_status` and `sync_host_once`
 for hosts that can explicitly call MCP tools. These tools still do not make the
@@ -151,9 +153,9 @@ Host surfaces are intentionally different:
 |---------|--------------|---------------------|
 | Desktop notification | Sends a local macOS notification when polling or `notify` runs | Does not approve, resume, queue, or update app unread state |
 | In-app MCP inbox | Stores durable `in_app` notifications readable through MCP tools | Does not make Codex App show an automatic badge or popup by itself |
-| Conductor confirmation prompt | For `needs_confirmation` candidates, resumes or queues a guardrailed notification-only prompt through Conductor's bundled `codex` when available | Does not confirm the binding, mark the event delivered, inspect files, call GitHub, edit code, comment, push, or take external actions |
-| Notify prompt soft trigger | With `notify-prompt` or `--notify-prompt-confirmed`, resumes or queues a guardrailed notification-only prompt asking whether to inspect the PR update. Conductor host sync uses the bundled `codex` path before SQLite mirroring. | Does not mark the event delivered, inspect files, call GitHub, edit code, comment, push, or take external actions |
-| Conductor mirror | Experimental/private-surface SQLite fallback/diagnostic adapter that inserts assistant-role synthetic PR Watch update messages into the matched Conductor session and marks its session/workspace unread | Does not send user input, execute the session, or use Conductor's sidecar socket |
+| Conductor confirmation prompt | For `needs_confirmation` candidates, inserts a guardrailed notification-only synthetic turn into the matched Conductor session; falls back to bundled `codex exec resume` only when the DB surface is unavailable | Does not confirm the binding, mark the event delivered, inspect files, call GitHub, edit code, comment, push, or take external actions |
+| Notify prompt soft trigger | With `notify-prompt` or `--notify-prompt-confirmed`, sends a guardrailed notification-only prompt asking whether to inspect the PR update. Conductor host sync prefers the visible SQLite turn; non-Conductor targets use resume/queue. | Does not mark the event delivered, inspect files, call GitHub, edit code, comment, push, or take external actions |
+| Conductor mirror | Experimental/private-surface SQLite adapter that inserts visible synthetic PR Watch turns into the matched Conductor session and marks its session/workspace unread | Does not execute the session or use Conductor's sidecar socket |
 | Confirmed-binding auto-trigger | With `--trigger-confirmed`, approves/queues/resumes only confirmed, high-confidence bindings | Does not auto-confirm first inferred bindings; ambiguous or low-confidence events stay pending |
 
 Codex App support is currently diagnostic only for push-style UI. MCP
@@ -161,12 +163,13 @@ registration lets Codex App call the PR Watch inbox tools, but there is no known
 stable local Codex App API for automatic app badges, popups, or session pushes.
 
 The Conductor mirror is marked experimental because it writes to Conductor's
-private local SQLite schema. It is no longer the primary path for session-visible
-confirmation prompts or confirmed notification prompts. Use `host status` first
-when you deliberately need the SQLite diagnostic/fallback path. Mirroring is
-deduped per event/host target in PR Watch state and also embeds
-`pr-watch:event_id=...` in the synthetic assistant message so repeated runs do
-not spam the session.
+private local SQLite schema. It is the current best-effort path for
+session-visible Conductor notifications because Conductor renders its own
+`session_messages` rows, not Codex JSONL rows written by an external `codex`
+process. Use `host status` first when diagnosing the private DB surface.
+Mirroring is deduped per event/host target and ignores legacy hidden synthetic
+rows that lack a visible `turn_id`, so upgrading PR Watch can repair earlier
+hidden notifications without spamming once a visible turn exists.
 
 To make host sync automatic, reuse the existing launchd one-shot watcher and add
 `--host-sync`:
@@ -177,10 +180,10 @@ pr-watch service install --interval 120 --notification-mode in_app --host-sync -
 ```
 
 With `--host conductor`, high-confidence `needs_confirmation` events use the
-notification-only Conductor codex prompt path. The service path defaults that
-prompt's session state to `idle`, so the prompt is sent immediately unless you
-install with `--notify-prompt-session-state unknown` in flows that expose that
-option.
+notification-only visible Conductor turn path when the Conductor DB is
+available. If the DB is unavailable, PR Watch falls back to the Conductor Codex
+resume prompt path. The service path defaults that fallback prompt's session
+state to `idle`.
 
 Add `--trigger-confirmed` only when you want confirmed bindings to be queued or
 resumed automatically. The default session state is `unknown`, so confirmed
@@ -193,14 +196,13 @@ pr-watch host sync-once --trigger-confirmed --session-state idle
 ```
 
 Use `--notify-prompt-confirmed` when you want confirmed events surfaced as
-notification-only prompts in the bound session. This sends a prompt into the
-confirmed bound session and leaves the PR event `pending` /
-`awaiting_approval`; for Conductor, this prompt path is preferred over the
-SQLite mirror even when the DB is available. The service path defaults this soft
-prompt session state to `idle`, so opting in sends the safe prompt immediately;
-pass
-`--notify-prompt-session-state unknown` if you prefer queue-only behavior. You
-can also target one event manually:
+notification-only prompts in the bound session. This leaves the PR event
+`pending` / `awaiting_approval`; for Conductor, host sync writes a visible
+synthetic turn when the DB surface is available and uses the resume/queue prompt
+path only as fallback. The service path defaults this fallback soft prompt
+session state to `idle`; pass `--notify-prompt-session-state unknown` if you
+prefer queue-only behavior when fallback is needed. You can also target one
+event manually:
 
 ```bash
 pr-watch notify-prompt <event-id> --session-state unknown

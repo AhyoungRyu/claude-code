@@ -159,6 +159,27 @@ def _sync_conductor(
         binding = store.get_binding(event.binding_id)
         if _needs_binding_confirmation(event, binding):
             assert binding is not None
+            if conductor_status.available:
+                mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
+                if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
+                    store.upsert_host_sync(
+                        event.event_id,
+                        "conductor_confirmation",
+                        binding.session_id,
+                        mirrored.action,
+                        external_id=mirrored.message_id,
+                    )
+                results.append(
+                    HostEventResult(
+                        host="conductor",
+                        event_id=event.event_id,
+                        action=mirrored.action,
+                        target_id=mirrored.session_id or binding.session_id,
+                        message=mirrored.message,
+                    )
+                )
+                continue
+
             delivered = confirmation_prompt_event(
                 store,
                 event.event_id,
@@ -177,32 +198,8 @@ def _sync_conductor(
                     )
                 )
                 continue
-
-            existing = store.get_host_sync(event.event_id, "conductor_confirmation", binding.session_id)
-            if existing:
-                continue
-            mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
-            if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
-                store.upsert_host_sync(
-                    event.event_id,
-                    "conductor_confirmation",
-                    binding.session_id,
-                    mirrored.action,
-                    external_id=mirrored.message_id,
-                )
-            results.append(
-                HostEventResult(
-                    host="conductor",
-                    event_id=event.event_id,
-                    action=mirrored.action,
-                    target_id=mirrored.session_id or binding.session_id,
-                    message=mirrored.message,
-                )
-            )
             continue
         if not _has_confirmed_binding(event, binding):
-            continue
-        if notify_prompt_confirmed and _is_confirmed_trigger_candidate(event, binding):
             continue
         assert binding is not None
         if not conductor_status.available:
@@ -217,19 +214,6 @@ def _sync_conductor(
                 )
                 reported_unavailable = True
             continue
-        existing = store.get_host_sync(event.event_id, "conductor", binding.session_id)
-        if existing:
-            results.append(
-                HostEventResult(
-                    host="conductor",
-                    event_id=event.event_id,
-                    action="already_synced",
-                    target_id=binding.session_id,
-                    message="event already synced to this host target",
-                )
-            )
-            continue
-
         mirrored = mirror_event_to_conductor(conductor_status.db_path, event, binding)
         target_id = mirrored.session_id or binding.session_id
         if mirrored.action in {"mirrored", "already_synced"}:

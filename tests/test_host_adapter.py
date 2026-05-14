@@ -96,6 +96,7 @@ def create_conductor_db(path, session_id="conductor-session-1", claude_session_i
               created_at text default (datetime('now')),
               sent_at text,
               full_message text,
+              turn_id text,
               is_resumable_message integer,
               queue_order integer
             );
@@ -157,7 +158,11 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("conductor-session-1", first.session_id)
             with sqlite3.connect(db_path) as conn:
                 messages = conn.execute(
-                    "select role, content, created_at, sent_at from session_messages"
+                    """
+                    select id, role, content, created_at, sent_at, turn_id, queue_order
+                    from session_messages
+                    order by created_at, role desc
+                    """
                 ).fetchall()
                 session_unread = conn.execute(
                     "select unread_count from sessions where id = ?",
@@ -167,12 +172,18 @@ class HostAdapterTests(unittest.TestCase):
                     "select unread from workspaces where id = 'workspace-1'"
                 ).fetchone()[0]
 
-            self.assertEqual(1, len(messages))
-            self.assertEqual("assistant", messages[0][0])
-            self.assertIn(f"pr-watch:event_id={event.event_id}", messages[0][1])
-            self.assertIn("synthetic", messages[0][1])
-            self.assertEqual(messages[0][2], messages[0][3])
-            payload = json.loads(messages[0][1])
+            self.assertEqual(2, len(messages))
+            user = next(row for row in messages if row[1] == "user")
+            assistant = next(row for row in messages if row[1] == "assistant")
+            self.assertEqual(user[0], user[5])
+            self.assertEqual(user[0], assistant[5])
+            self.assertEqual(1, user[6])
+            self.assertIn(f"pr-watch:event_id={event.event_id}", user[2])
+            self.assertIn("notification only", user[2])
+            self.assertIn(f"pr-watch:event_id={event.event_id}", assistant[2])
+            self.assertIn("synthetic", assistant[2])
+            self.assertEqual(assistant[3], assistant[4])
+            payload = json.loads(assistant[2])
             self.assertEqual("assistant", payload["type"])
             self.assertEqual("conductor-session-1", payload["session_id"])
             self.assertEqual("assistant", payload["message"]["role"])
@@ -207,7 +218,10 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("conductor-session-1", result.session_id)
             with sqlite3.connect(db_path) as conn:
                 content = conn.execute("select content from session_messages").fetchone()[0]
-            self.assertEqual("claude-abc", json.loads(content)["session_id"])
+            assistant_content = conn.execute(
+                "select content from session_messages where role = 'assistant'"
+            ).fetchone()[0]
+            self.assertEqual("claude-abc", json.loads(assistant_content)["session_id"])
 
     def test_host_sync_records_state_dedupe_for_conductor_mirrors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -237,7 +251,55 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIsNotNone(store.get_host_sync(event.event_id, "conductor", "conductor-session-1"))
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(1, count)
+            self.assertEqual(2, count)
+
+    def test_conductor_mirror_repairs_hidden_legacy_synthetic_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path, session_id="conductor-session-1")
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=True,
+                confirmation_source="explicit_bind",
+                evidence=["explicit user binding"],
+            )
+            event = make_inbox_item(store, binding_id=binding.binding_id)
+            marker = f"pr-watch:event_id={event.event_id}"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    insert into session_messages (id, session_id, role, content, created_at, sent_at)
+                    values ('legacy-hidden', 'conductor-session-1', 'assistant', ?, '2026-05-14T00:00:00Z', '2026-05-14T00:00:00Z')
+                    """,
+                    (json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": marker}]}}),),
+                )
+
+            result = mirror_event_to_conductor(db_path, event, binding)
+
+            self.assertEqual("mirrored", result.action)
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    select id, role, turn_id, content from session_messages
+                    where content like ?
+                    order by created_at
+                    """,
+                    (f"%{marker}%",),
+                ).fetchall()
+            self.assertEqual(3, len(rows))
+            self.assertEqual("legacy-hidden", rows[0][0])
+            visible_user = next(row for row in rows if row[1] == "user")
+            visible_assistant = next(row for row in rows if row[1] == "assistant" and row[0] != "legacy-hidden")
+            self.assertEqual(visible_user[0], visible_user[2])
+            self.assertEqual(visible_user[0], visible_assistant[2])
 
     def test_confirm_binding_for_event_mirrors_current_event_without_triggering_resume(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -279,9 +341,9 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("pending", store.get_event(event.event_id).status)
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(1, count)
+            self.assertEqual(2, count)
 
-    def test_host_sync_queues_confirmation_prompt_to_candidate_session_when_state_unknown(self):
+    def test_host_sync_mirrors_confirmation_to_visible_conductor_turn_when_state_unknown(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conductor.sqlite"
             create_conductor_db(db_path)
@@ -310,21 +372,21 @@ class HostAdapterTests(unittest.TestCase):
             first = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
             second = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
 
-            self.assertEqual(["confirmation_prompt_queued"], [item.action for item in first.host_results])
-            self.assertEqual(["confirmation_prompt_already_queued"], [item.action for item in second.host_results])
+            self.assertEqual(["confirmation_requested"], [item.action for item in first.host_results])
+            self.assertEqual(["confirmation_already_requested"], [item.action for item in second.host_results])
             self.assertIsNotNone(
-                store.get_host_sync(event.event_id, "conductor_confirmation_prompt", candidate.session_id)
+                store.get_host_sync(event.event_id, "conductor_confirmation", candidate.session_id)
             )
             queue = store.list_queue()
-            self.assertEqual(1, len(queue))
-            self.assertIn("PR Watch notification only.", queue[0].prompt)
-            self.assertIn(f"Confirmation event id: {event.event_id}", queue[0].prompt)
+            self.assertEqual(0, len(queue))
             self.assertEqual("needs_confirmation", store.get_event(event.event_id).status)
             with sqlite3.connect(db_path) as conn:
                 rows = conn.execute("select content, created_at, sent_at from session_messages").fetchall()
-            self.assertEqual(0, len(rows))
+            self.assertEqual(2, len(rows))
+            self.assertTrue(any("PR Watch notification only." in row[0] for row in rows))
+            self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in row[0] for row in rows))
 
-    def test_host_sync_sends_confirmation_prompt_via_conductor_codex_before_db_mirror(self):
+    def test_host_sync_prefers_visible_conductor_turn_before_codex_resume_prompt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conductor.sqlite"
             create_conductor_db(db_path)
@@ -362,20 +424,15 @@ class HostAdapterTests(unittest.TestCase):
                     session_state="idle",
                 )
 
-            self.assertEqual(["confirmation_prompt_sent"], [item.action for item in result.host_results])
-            self.assertEqual(1, len(runner.commands))
-            self.assertEqual([str(conductor_codex), "exec", "resume", "conductor-session-1"], runner.commands[0][:4])
-            prompt = runner.commands[0][4]
-            self.assertIn("PR Watch notification only.", prompt)
-            self.assertIn("Do not inspect files/edit/comment unless user asks.", prompt)
-            self.assertIn(f"Confirmation event id: {event.event_id}", prompt)
-            self.assertIn(f"pr-watch confirm-binding {event.event_id}", prompt)
-            self.assertIn("Role: reviewer", prompt)
+            self.assertEqual(["confirmation_requested"], [item.action for item in result.host_results])
+            self.assertEqual([], runner.commands)
             with sqlite3.connect(db_path) as conn:
-                count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(0, count)
+                rows = conn.execute("select role, content, turn_id from session_messages order by role desc").fetchall()
+            self.assertEqual(2, len(rows))
+            self.assertEqual({"assistant", "user"}, {row[0] for row in rows})
+            self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in row[1] for row in rows))
             self.assertIsNotNone(
-                store.get_host_sync(event.event_id, "conductor_confirmation_prompt", candidate.session_id)
+                store.get_host_sync(event.event_id, "conductor_confirmation", candidate.session_id)
             )
 
     def test_host_sync_sends_confirmation_prompt_even_when_conductor_db_is_missing(self):
@@ -467,13 +524,18 @@ class HostAdapterTests(unittest.TestCase):
                     session_state="idle",
                 )
 
-            self.assertEqual(["confirmation_prompt_sent"], [item.action for item in result.host_results])
-            self.assertEqual(1, len(runner.commands))
-            self.assertEqual("sent", store.get_host_sync(
+            self.assertEqual(["confirmation_requested"], [item.action for item in result.host_results])
+            self.assertEqual([], runner.commands)
+            self.assertEqual("failed", store.get_host_sync(
                 event.event_id,
                 "conductor_confirmation_prompt",
                 candidate.session_id,
             ).status)
+            self.assertIsNotNone(store.get_host_sync(
+                event.event_id,
+                "conductor_confirmation",
+                candidate.session_id,
+            ))
 
     def test_confirm_after_confirmation_prompt_can_still_mirror_actual_event(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -511,10 +573,10 @@ class HostAdapterTests(unittest.TestCase):
 
             with sqlite3.connect(db_path) as conn:
                 contents = [row[0] for row in conn.execute("select content from session_messages order by created_at")]
-            self.assertEqual(1, len(contents))
+            self.assertEqual(4, len(contents))
             self.assertTrue(any(f"pr-watch:event_id={event.event_id}" in item for item in contents))
-            self.assertEqual(1, len(store.list_queue()))
-            self.assertIn(f"Confirmation event id: {event.event_id}", store.list_queue()[0].prompt)
+            self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in item for item in contents))
+            self.assertEqual(0, len(store.list_queue()))
 
     def test_trigger_confirmed_only_resumes_confirmed_high_confidence_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -644,7 +706,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("mirrored", output.getvalue())
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(1, count)
+            self.assertEqual(2, count)
 
     def test_mcp_host_tools_report_status_and_sync_conductor(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -678,7 +740,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("mirrored", result["host_results"][0]["action"])
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(1, count)
+            self.assertEqual(2, count)
 
     def test_launchd_service_can_run_host_sync_after_polling(self):
         from pr_watch.service import build_launchd_plist
@@ -774,7 +836,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("mirrored=1", result.message)
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(1, count)
+            self.assertEqual(2, count)
 
 
 if __name__ == "__main__":

@@ -98,6 +98,7 @@ def create_conductor_db(path, session_id="conductor-session-1", claude_session_i
               created_at text default (datetime('now')),
               sent_at text,
               full_message text,
+              turn_id text,
               is_resumable_message integer,
               queue_order integer
             );
@@ -312,7 +313,7 @@ class NotifyPromptTests(unittest.TestCase):
             self.assertEqual("resume failed", result.notify_prompt_results[0].message)
             self.assertEqual("pending", store.get_event(event.event_id).status)
 
-    def test_host_sync_notify_prompt_confirmed_uses_conductor_codex_before_db_mirror(self):
+    def test_host_sync_notify_prompt_confirmed_prefers_visible_conductor_turn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conductor.sqlite"
             create_conductor_db(db_path)
@@ -337,18 +338,16 @@ class NotifyPromptTests(unittest.TestCase):
                     session_state="idle",
                 )
 
-            self.assertEqual([], result.host_results)
-            self.assertEqual(["notify_prompt_sent"], [item.action for item in result.notify_prompt_results])
-            self.assertEqual(1, len(runner.commands))
-            self.assertEqual([str(conductor_codex), "exec", "resume", "conductor-session-1"], runner.commands[0][:4])
-            prompt = runner.commands[0][4]
-            self.assertIn("PR Watch notification only.", prompt)
-            self.assertIn("Do not inspect files/edit/comment unless user asks.", prompt)
-            self.assertIn(f"Event id: {event.event_id}", prompt)
+            self.assertEqual(["mirrored"], [item.action for item in result.host_results])
+            self.assertEqual([], result.notify_prompt_results)
+            self.assertEqual([], runner.commands)
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
-            self.assertEqual(0, count)
-            self.assertIsNotNone(store.get_host_sync(event.event_id, "notify_prompt", "conductor-session-1"))
+                contents = [row[0] for row in conn.execute("select content from session_messages")]
+            self.assertEqual(2, count)
+            self.assertTrue(any("PR Watch notification only." in content for content in contents))
+            self.assertTrue(any(f"pr-watch:event_id={event.event_id}" in content for content in contents))
+            self.assertIsNotNone(store.get_host_sync(event.event_id, "conductor", "conductor-session-1"))
 
     def test_cli_notify_prompt_queues_soft_prompt_without_external_resume_when_state_unknown(self):
         with tempfile.TemporaryDirectory() as tmpdir:

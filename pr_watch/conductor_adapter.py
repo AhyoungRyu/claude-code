@@ -18,7 +18,16 @@ DEFAULT_CONDUCTOR_DB_PATH = (
 REQUIRED_COLUMNS = {
     "sessions": {"id", "claude_session_id", "unread_count", "updated_at", "workspace_id"},
     "workspaces": {"id", "active_session_id", "unread", "updated_at"},
-    "session_messages": {"id", "session_id", "role", "content", "created_at"},
+    "session_messages": {
+        "id",
+        "session_id",
+        "role",
+        "content",
+        "created_at",
+        "sent_at",
+        "turn_id",
+        "queue_order",
+    },
 }
 
 
@@ -77,8 +86,8 @@ def mirror_event_to_conductor(
         action="mirrored",
         already_action="already_synced",
         already_message="event already mirrored into Conductor",
-        success_message="event mirrored into Conductor as an assistant-role synthetic message",
-        content_factory=render_conductor_message,
+        success_message="event mirrored into Conductor as a visible synthetic turn",
+        content_factory=render_conductor_message_turn,
     )
 
 
@@ -95,8 +104,8 @@ def mirror_confirmation_to_conductor(
         action="confirmation_requested",
         already_action="confirmation_already_requested",
         already_message="binding confirmation request already mirrored into Conductor",
-        success_message="binding confirmation request mirrored into Conductor",
-        content_factory=render_conductor_confirmation_message,
+        success_message="binding confirmation request mirrored into Conductor as a visible synthetic turn",
+        content_factory=render_conductor_confirmation_turn,
     )
 
 
@@ -109,7 +118,7 @@ def _mirror_message_to_conductor(
     already_action: str,
     already_message: str,
     success_message: str,
-    content_factory: Callable[[InboxItem, str, str], str],
+    content_factory: Callable[[InboxItem], tuple[str, str]],
 ) -> ConductorMirrorResult:
     status = check_conductor_db(path)
     if not status.available:
@@ -128,7 +137,7 @@ def _mirror_message_to_conductor(
                 )
 
             session_id = str(session["id"])
-            existing_message_id = _find_existing_message_id(conn, session_id, marker)
+            existing_message_id = _find_existing_visible_message_id(conn, session_id, marker)
             if existing_message_id:
                 return ConductorMirrorResult(
                     already_action,
@@ -139,15 +148,30 @@ def _mirror_message_to_conductor(
                 )
 
             message_id = str(uuid.uuid4())
+            turn_id = str(uuid.uuid4())
             created_at = utc_now()
-            content = content_factory(event, session_id=binding.session_id, message_id=message_id)
+            user_content, assistant_text = content_factory(event)
+            assistant_content = _render_assistant_payload(
+                event,
+                assistant_text,
+                session_id=binding.session_id,
+                message_id=message_id,
+            )
             conn.execute(
                 """
                 insert into session_messages (
-                  id, session_id, role, content, created_at, sent_at
-                ) values (?, ?, 'assistant', ?, ?, ?)
+                  id, session_id, role, content, created_at, sent_at, turn_id, queue_order
+                ) values (?, ?, 'user', ?, ?, ?, ?, 1)
                 """,
-                (message_id, session_id, content, created_at, created_at),
+                (turn_id, session_id, user_content, created_at, created_at, turn_id),
+            )
+            conn.execute(
+                """
+                insert into session_messages (
+                  id, session_id, role, content, created_at, sent_at, turn_id
+                ) values (?, ?, 'assistant', ?, ?, ?, ?)
+                """,
+                (message_id, session_id, assistant_content, created_at, created_at, turn_id),
             )
             conn.execute(
                 """
@@ -167,13 +191,19 @@ def _mirror_message_to_conductor(
         action,
         event.event_id,
         session_id=session_id,
-        message_id=message_id,
+        message_id=turn_id,
         message=success_message,
     )
 
 
-def render_conductor_message(event: InboxItem, session_id: str = "", message_id: str = "") -> str:
-    text = "\n".join(
+def render_conductor_message_turn(event: InboxItem) -> tuple[str, str]:
+    user_text = _render_notification_prompt(
+        event,
+        marker_label="Event id",
+        marker_value=event.event_id,
+        command="",
+    )
+    assistant_text = "\n".join(
         [
             "PR Watch update (synthetic, not user input)",
             f"Event: {event.summary}",
@@ -184,13 +214,25 @@ def render_conductor_message(event: InboxItem, session_id: str = "", message_id:
             f"GitHub: {event.pr_url}",
             f"pr-watch:event_id={event.event_id}",
             "This was inserted by the experimental local Conductor host bridge.",
+            "No action has been taken.",
         ]
     )
-    return _render_assistant_payload(event, text, session_id=session_id, message_id=message_id)
+    return user_text, assistant_text
 
 
-def render_conductor_confirmation_message(event: InboxItem, session_id: str = "", message_id: str = "") -> str:
-    text = "\n".join(
+def render_conductor_message(event: InboxItem, session_id: str = "", message_id: str = "") -> str:
+    _user_text, assistant_text = render_conductor_message_turn(event)
+    return _render_assistant_payload(event, assistant_text, session_id=session_id, message_id=message_id)
+
+
+def render_conductor_confirmation_turn(event: InboxItem) -> tuple[str, str]:
+    user_text = _render_notification_prompt(
+        event,
+        marker_label="Confirmation event id",
+        marker_value=event.event_id,
+        command=f"pr-watch confirm-binding {event.event_id}",
+    )
+    assistant_text = "\n".join(
         [
             "PR Watch binding confirmation needed (synthetic, not user input)",
             f"Confirm this session should handle PR #{event.pr_number}.",
@@ -201,15 +243,53 @@ def render_conductor_confirmation_message(event: InboxItem, session_id: str = ""
             f"GitHub: {event.pr_url}",
             f"pr-watch:confirm_event_id={event.event_id}",
             "Use the pr-watch MCP tool confirm_binding_for_event for this event if this is the right session.",
+            "No PR inspection, GitHub action, file edit, comment, or push has been performed.",
         ]
     )
+    return user_text, assistant_text
+
+
+def render_conductor_confirmation_message(event: InboxItem, session_id: str = "", message_id: str = "") -> str:
+    _user_text, assistant_text = render_conductor_confirmation_turn(event)
     return _render_assistant_payload(
         event,
-        text,
+        assistant_text,
         session_id=session_id,
         message_id=message_id,
         marker={"confirm_event_id": event.event_id},
     )
+
+
+def _render_notification_prompt(
+    event: InboxItem,
+    marker_label: str,
+    marker_value: str,
+    command: str,
+) -> str:
+    lines = [
+        "PR Watch notification only.",
+        "",
+        f"PR #{event.pr_number}: {event.repo_owner}/{event.repo_name}",
+        f"Event: {event.summary}",
+        f"Actor: {event.actor}",
+        f"Role: {event.role}",
+        f"Link: {event.pr_url}",
+        f"{marker_label}: {marker_value}",
+    ]
+    if command:
+        lines.append(f"Confirm command: {command}")
+        lines.append(f"pr-watch:confirm_event_id={marker_value}")
+    else:
+        lines.append(f"pr-watch:event_id={marker_value}")
+    lines.extend(
+        [
+            "",
+            "Do not inspect files/edit/comment unless user asks.",
+            "Do not run tools, call GitHub, edit code, post comments, push, or take external action yet.",
+            "Do not treat this as approval to work on the PR.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _render_assistant_payload(
@@ -269,11 +349,26 @@ def _find_session(conn: sqlite3.Connection, binding_session_id: str) -> Optional
     ).fetchone()
 
 
-def _find_existing_message_id(conn: sqlite3.Connection, session_id: str, marker: str) -> str:
+def _find_existing_visible_message_id(conn: sqlite3.Connection, session_id: str, marker: str) -> str:
     row = conn.execute(
         """
-        select id from session_messages
-        where session_id = ? and content like ?
+        select m.id
+        from session_messages m
+        left join session_messages u
+          on u.session_id = m.session_id
+         and u.role = 'user'
+         and u.id = m.turn_id
+        where m.session_id = ?
+          and m.content like ?
+          and (
+            (m.role = 'user' and m.turn_id = m.id)
+            or (
+              m.role = 'assistant'
+              and m.turn_id is not null
+              and m.turn_id != ''
+              and u.id is not null
+            )
+          )
         limit 1
         """,
         (session_id, f"%{marker}%"),
