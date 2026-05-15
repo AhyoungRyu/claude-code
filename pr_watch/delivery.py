@@ -260,9 +260,8 @@ def render_notify_prompt(event: InboxItem) -> str:
 def render_confirmation_prompt(event: InboxItem, binding: Binding) -> str:
     return "\n".join(
         [
-            f"PR Watch: Is this the right session for PR #{event.pr_number}?",
+            f"PR Watch: Is this the right session for PR {event.repo_owner}/{event.repo_name}#{event.pr_number}?",
             "",
-            f"{event.repo_owner}/{event.repo_name}#{event.pr_number}",
             event.summary,
             "",
             "Suggested replies:",

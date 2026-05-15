@@ -700,8 +700,12 @@ class HostAdapterTests(unittest.TestCase):
                 assistant_content = conn.execute(
                     "select content from session_messages where role = 'assistant'"
                 ).fetchone()[0]
-            self.assertIn("PR Watch: Is this the right session", user_content)
+            self.assertIn(
+                "PR Watch: Is this the right session for PR sendbird/ai-agent-js#1049?",
+                user_content,
+            )
             self.assertIn("sendbird/ai-agent-js#1049", user_content)
+            self.assertNotIn("\n\nsendbird/ai-agent-js#1049\n", user_content)
             self.assertIn("bang9 pushed new commits to PR #1049", user_content)
             self.assertIn("Suggested replies:", user_content)
             self.assertIn("Confirm this session", user_content)

@@ -285,9 +285,8 @@ def render_conductor_confirmation_message(event: InboxItem, session_id: str = ""
 def _render_confirmation_user_prompt(event: InboxItem) -> str:
     return "\n".join(
         [
-            f"PR Watch: Is this the right session for PR #{event.pr_number}?",
+            f"PR Watch: Is this the right session for PR {event.repo_owner}/{event.repo_name}#{event.pr_number}?",
             "",
-            f"{event.repo_owner}/{event.repo_name}#{event.pr_number}",
             event.summary,
             "",
             "Suggested replies:",
