@@ -381,6 +381,9 @@ class StateStore:
     ) -> InboxItem:
         now = utc_now()
         existing = self.find_event_by_dedupe(event.dedupe_key)
+        if existing is None:
+            existing = self.find_equivalent_condition_event(event)
+        dedupe_key = existing.dedupe_key if existing else event.dedupe_key
         event_id = existing.event_id if existing else random_id("evt")
         created_at = existing.created_at if existing else now
         next_status = status
@@ -413,7 +416,7 @@ class StateStore:
                 """,
                 (
                     event_id,
-                    event.dedupe_key,
+                    dedupe_key,
                     event.pr.owner,
                     event.pr.repo,
                     event.pr.number,
@@ -439,6 +442,41 @@ class StateStore:
         with self.connect() as conn:
             row = conn.execute("select * from events where dedupe_key = ?", (dedupe_key,)).fetchone()
         return _event_from_row(row) if row else None
+
+    def find_equivalent_condition_event(self, event: ClassifiedEvent) -> Optional[InboxItem]:
+        condition_key = _condition_key(event)
+        if not condition_key:
+            return None
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select * from events
+                where repo_owner = ?
+                  and repo_name = ?
+                  and pr_number = ?
+                  and role = ?
+                  and event_type = ?
+                  and actor = ?
+                  and status not in ('delivered', 'dismissed', 'dropped')
+                order by updated_at desc
+                """,
+                (
+                    event.pr.owner,
+                    event.pr.repo,
+                    event.pr.number,
+                    event.role,
+                    event.event_type,
+                    event.actor,
+                ),
+            ).fetchall()
+        for row in rows:
+            existing = _event_from_row(row)
+            existing_condition_key = existing.payload.get("condition_key")
+            if existing_condition_key == condition_key:
+                return existing
+            if not existing_condition_key and existing.summary == event.summary:
+                return existing
+        return None
 
     def get_event(self, event_id: str) -> InboxItem:
         with self.connect() as conn:
@@ -842,6 +880,11 @@ def _should_preserve_delivery_state(existing: InboxItem) -> bool:
     }
     final_statuses = {"delivered", "dismissed", "dropped", "queued"}
     return existing.status in final_statuses or existing.delivery_status in user_decision_states
+
+
+def _condition_key(event: ClassifiedEvent) -> str:
+    value = event.payload.get("condition_key")
+    return str(value) if value else ""
 
 
 def _queue_from_row(row: sqlite3.Row) -> QueueItem:

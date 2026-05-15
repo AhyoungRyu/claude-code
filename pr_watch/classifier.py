@@ -80,34 +80,52 @@ def _author_events(
             payload={"reviewDecision": review_decision},
         )
 
-    failed_checks = [
-        _check_name(check)
-        for check in _items(pr_data.get("statusCheckRollup") or pr_data.get("checks"))
-        if _check_failed(check)
-    ]
+    failed_checks = sorted(
+        {
+            name
+            for name in (
+                _check_name(check)
+                for check in _items(pr_data.get("statusCheckRollup") or pr_data.get("checks"))
+                if _check_failed(check)
+            )
+            if name
+        }
+    )
     if failed_checks:
-        names = ", ".join(name for name in failed_checks if name) or "one or more checks"
+        names = ", ".join(failed_checks) or "one or more checks"
+        head_key = _head_key(pr_data, updated_at)
+        condition_key = f"{head_key}:{names}"
         yield _event(
             pr,
             role="author",
             event_type="ci_failed",
             actor="github",
-            occurred_at=updated_at,
+            occurred_at=f"ci_failed:{condition_key}",
             summary=f"CI failed on PR #{pr.number}: {names}.",
-            payload={"failed_checks": failed_checks},
+            payload={
+                "failed_checks": failed_checks,
+                "headRefOid": str(pr_data.get("headRefOid") or ""),
+                "condition_key": condition_key,
+            },
         )
 
     if _has_merge_conflict(pr_data):
+        head_key = _head_key(pr_data, updated_at)
+        merge_state = str(pr_data.get("mergeStateStatus") or "")
+        mergeable = str(pr_data.get("mergeable") or "")
+        condition_key = f"{head_key}:{merge_state}:{mergeable}"
         yield _event(
             pr,
             role="author",
             event_type="merge_conflict",
             actor="github",
-            occurred_at=updated_at,
+            occurred_at=f"merge_conflict:{condition_key}",
             summary=f"PR #{pr.number} has a merge conflict.",
             payload={
-                "mergeStateStatus": pr_data.get("mergeStateStatus"),
-                "mergeable": pr_data.get("mergeable"),
+                "mergeStateStatus": merge_state,
+                "mergeable": mergeable,
+                "headRefOid": str(pr_data.get("headRefOid") or ""),
+                "condition_key": condition_key,
             },
         )
 
@@ -318,6 +336,17 @@ def _check_failed(check: Dict[str, Any]) -> bool:
 
 def _check_name(check: Dict[str, Any]) -> str:
     return str(check.get("name") or check.get("context") or check.get("workflowName") or "check")
+
+
+def _head_key(pr_data: Dict[str, Any], updated_at: str) -> str:
+    return str(
+        pr_data.get("headRefOid")
+        or pr_data.get("head_sha")
+        or pr_data.get("headSha")
+        or pr_data.get("lastPushedAt")
+        or pr_data.get("last_pushed_at")
+        or updated_at
+    )
 
 
 def _is_actionable_human_comment(comment: Dict[str, Any], current_user: str) -> bool:

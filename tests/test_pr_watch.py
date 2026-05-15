@@ -475,6 +475,99 @@ class PrWatchTests(unittest.TestCase):
             [event.dedupe_key for event in second],
         )
 
+    def test_ci_failed_dedupe_ignores_unrelated_pr_updated_at_changes(self):
+        base = {
+            "owner": "sendbird",
+            "repo": "ai-agent-js",
+            "number": 1049,
+            "url": PR_URL,
+            "title": "Improve the tool runner",
+            "author": {"login": "irene"},
+            "headRefOid": "head-sha-1",
+            "statusCheckRollup": [
+                {"name": "sync-approved-label", "conclusion": "FAILURE"},
+                {"name": "sync-approved-label", "conclusion": "FAILURE"},
+            ],
+            "updatedAt": "2026-05-15T03:03:00Z",
+        }
+        noisy_update = {**base, "updatedAt": "2026-05-15T04:22:00Z"}
+
+        first = [event for event in classify_pr(base, current_user="irene") if event.event_type == "ci_failed"]
+        second = [event for event in classify_pr(noisy_update, current_user="irene") if event.event_type == "ci_failed"]
+
+        self.assertEqual(1, len(first))
+        self.assertEqual(1, len(second))
+        self.assertEqual(first[0].dedupe_key, second[0].dedupe_key)
+        self.assertEqual("CI failed on PR #1049: sync-approved-label.", first[0].summary)
+        self.assertEqual(
+            {
+                "failed_checks": ["sync-approved-label"],
+                "headRefOid": "head-sha-1",
+                "condition_key": "head-sha-1:sync-approved-label",
+            },
+            first[0].payload,
+        )
+
+    def test_legacy_ci_failed_event_is_reused_after_condition_dedupe_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            old_event = ClassifiedEvent(
+                pr=PullRequestRef(
+                    owner="sendbird",
+                    repo="ai-agent-js",
+                    number=1049,
+                    url=PR_URL,
+                    title="Improve the tool runner",
+                    head_ref="review/pr-1049",
+                ),
+                role="author",
+                event_type="ci_failed",
+                summary="CI failed on PR #1049: sync-approved-label.",
+                actor="github",
+                actionable=True,
+                dedupe_key=stable_id(
+                    "sendbird/ai-agent-js",
+                    1049,
+                    "author",
+                    "ci_failed",
+                    "github",
+                    "2026-05-15T03:03:00Z",
+                ),
+                payload={"failed_checks": ["sync-approved-label"]},
+            )
+            old_item = store.upsert_event(
+                old_event,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=None,
+                confidence="high",
+                evidence=["legacy event"],
+            )
+
+            upgraded_event = [
+                event
+                for event in classify_pr(
+                    {
+                        "owner": "sendbird",
+                        "repo": "ai-agent-js",
+                        "number": 1049,
+                        "url": PR_URL,
+                        "author": {"login": "irene"},
+                        "headRefOid": "head-sha-1",
+                        "statusCheckRollup": [{"name": "sync-approved-label", "conclusion": "FAILURE"}],
+                        "updatedAt": "2026-05-15T04:22:00Z",
+                    },
+                    current_user="irene",
+                )
+                if event.event_type == "ci_failed"
+            ][0]
+
+            routed = route_event(store, upgraded_event, sessions=[])
+
+            self.assertEqual(old_item.event_id, routed.event_id)
+            self.assertEqual(old_item.dedupe_key, routed.dedupe_key)
+            self.assertEqual("needs_confirmation", routed.status)
+
     def test_author_inline_review_comments_are_actionable_and_deduped(self):
         pr = {
             "owner": "sendbird",

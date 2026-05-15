@@ -255,8 +255,9 @@ def poll_once(
         if pr.get("isDraft") and not include_drafts:
             continue
         for event in classify_pr(pr, current_user_login):
-            current_dedupe_keys.append(event.dedupe_key)
-            routed.append(route_event(store, event, session_list))
+            routed_event = route_event(store, event, session_list)
+            current_dedupe_keys.append(routed_event.dedupe_key)
+            routed.append(routed_event)
     if reconcile_repo:
         store.dismiss_stale_current_pr_events(reconcile_repo, open_numbers, current_dedupe_keys)
     notify_events(store, routed, mode=notification_mode, notifier=notifier, host=notification_host)
