@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from pr_watch.classifier import classify_pr
 from pr_watch.cli import main
@@ -99,9 +100,64 @@ class PrWatchTests(unittest.TestCase):
             }
         ]
 
-        enrich_pull_request_metadata(prs, "sendbird/ai-agent-js")
+        with patch("pr_watch.github.fetch_pull_request_review_comments", return_value=[]):
+            enrich_pull_request_metadata(prs, "sendbird/ai-agent-js")
 
         self.assertEqual("2026-05-11T10:30:00Z", prs[0]["lastPushedAt"])
+
+    def test_github_polling_enriches_inline_review_comments(self):
+        prs = [
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1061,
+                "commits": [],
+            }
+        ]
+
+        def fake_run(args, capture_output, text, check):
+            self.assertEqual(
+                ["gh", "api", "repos/sendbird/ai-agent-js/pulls/1061/comments"],
+                args,
+            )
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="""
+                [
+                  {
+                    "id": 2313318077,
+                    "html_url": "https://github.com/sendbird/ai-agent-js/pull/1061#discussion_r2313318077",
+                    "user": {"login": "bang9", "type": "User"},
+                    "author_association": "MEMBER",
+                    "body": "Can we simplify this branch?",
+                    "path": "src/runtime.ts",
+                    "created_at": "2026-05-15T02:42:33Z",
+                    "updated_at": "2026-05-15T02:42:33Z"
+                  }
+                ]
+                """,
+                stderr="",
+            )
+
+        with patch("pr_watch.github.subprocess.run", fake_run):
+            enrich_pull_request_metadata(prs, "sendbird/ai-agent-js")
+
+        self.assertEqual(
+            [
+                {
+                    "id": 2313318077,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1061#discussion_r2313318077",
+                    "author": {"login": "bang9", "type": "User"},
+                    "authorAssociation": "MEMBER",
+                    "body": "Can we simplify this branch?",
+                    "path": "src/runtime.ts",
+                    "createdAt": "2026-05-15T02:42:33Z",
+                    "updatedAt": "2026-05-15T02:42:33Z",
+                }
+            ],
+            prs[0]["reviewComments"],
+        )
 
     def test_auto_notification_mode_prefers_in_app_for_app_hosts(self):
         self.assertEqual(
@@ -329,6 +385,78 @@ class PrWatchTests(unittest.TestCase):
             [event.dedupe_key for event in first],
             [event.dedupe_key for event in second],
         )
+
+    def test_author_inline_review_comments_are_actionable_and_deduped(self):
+        pr = {
+            "owner": "sendbird",
+            "repo": "ai-agent-js",
+            "number": 1061,
+            "url": "https://github.com/sendbird/ai-agent-js/pull/1061",
+            "title": "Update agent runtime",
+            "author": {"login": "irene"},
+            "reviewComments": [
+                {
+                    "id": 2313318077,
+                    "author": {"login": "bang9"},
+                    "body": "Can we simplify this branch?",
+                    "path": "src/runtime.ts",
+                    "updatedAt": "2026-05-15T02:42:33Z",
+                }
+            ],
+            "updatedAt": "2026-05-15T03:08:39Z",
+        }
+
+        first = classify_pr(pr, current_user="irene")
+        second = classify_pr(pr, current_user="irene")
+
+        review_comment_events = [event for event in first if event.event_type == "human_review_comment"]
+
+        self.assertEqual(1, len(review_comment_events))
+        self.assertEqual("author", review_comment_events[0].role)
+        self.assertEqual("bang9", review_comment_events[0].actor)
+        self.assertIn("inline review comment", review_comment_events[0].summary)
+        self.assertEqual(2313318077, review_comment_events[0].payload["comment_id"])
+        self.assertEqual(
+            [event.dedupe_key for event in first],
+            [event.dedupe_key for event in second],
+        )
+
+    def test_author_service_inline_review_comments_are_muted(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1061,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1061",
+                "author": {"login": "irene"},
+                "reviewComments": [
+                    {
+                        "id": "actions-inline-comment",
+                        "author": {"login": "github-actions", "type": "Bot"},
+                        "body": "Workflow run completed.",
+                        "updatedAt": "2026-05-15T02:42:33Z",
+                    },
+                    {
+                        "id": "dependabot-inline-comment",
+                        "author": {"login": "dependabot[bot]", "type": "Bot"},
+                        "body": "Bumps a dependency.",
+                        "updatedAt": "2026-05-15T03:08:39Z",
+                    },
+                    {
+                        "id": "human-inline-comment",
+                        "author": {"login": "bang9", "type": "User"},
+                        "body": "Can we simplify this branch?",
+                        "updatedAt": "2026-05-15T03:09:39Z",
+                    },
+                ],
+                "updatedAt": "2026-05-15T03:09:39Z",
+            },
+            current_user="irene",
+        )
+
+        review_comment_events = [event for event in events if event.event_type == "human_review_comment"]
+
+        self.assertEqual(["bang9"], [event.actor for event in review_comment_events])
 
     def test_author_service_deploy_preview_comments_are_muted(self):
         events = classify_pr(

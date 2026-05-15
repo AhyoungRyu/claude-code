@@ -484,10 +484,12 @@ evidence, then the newest `last_activity_at`. If multiple medium-or-better
 candidates are still tied, the event stays in the inbox with
 `ambiguous_session_candidates` until the user explicitly chooses one session.
 
-`pr-watch` also treats comments on GitHub issues linked from a PR as actionable
-PR context. It follows GitHub's `closingIssuesReferences` plus issue references
-in the PR body, fetches issue comments with `gh api`, and stores new human
-comments as `linked_issue_comment` inbox events. PR and linked issue comments
+`pr-watch` also treats inline PR review comments and comments on GitHub issues
+linked from a PR as actionable PR context. It fetches PR review comments plus
+GitHub's `closingIssuesReferences` and issue references in the PR body with
+`gh api`, then stores new human inline review comments as
+`human_review_comment` events and linked issue comments as
+`linked_issue_comment` inbox events. PR, inline review, and linked issue comments
 from bot/service deploy preview accounts such as Netlify, Vercel, GitHub
 Actions, Dependabot, and Renovate are ignored so they do not become confirmation
 prompts. Jira ticket updates are the same product shape, but need a separate

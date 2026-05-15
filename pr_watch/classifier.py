@@ -124,6 +124,25 @@ def _author_events(
                 payload={"comment_id": comment.get("id")},
             )
 
+    for comment in _items(pr_data.get("reviewComments") or pr_data.get("review_comments")):
+        actor = _login(comment.get("author"))
+        if _is_actionable_human_comment(comment, current_user):
+            comment_id = comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
+            occurred_at = str(comment.get("updatedAt") or comment.get("createdAt") or updated_at)
+            yield _event(
+                pr,
+                role="author",
+                event_type="human_review_comment",
+                actor=actor,
+                occurred_at=f"{occurred_at}:{comment_id}",
+                summary=f"{actor} left an inline review comment on your PR #{pr.number}.",
+                payload={
+                    "comment_id": comment_id,
+                    "path": comment.get("path") or "",
+                    "url": comment.get("url") or "",
+                },
+            )
+
 
 def _reviewer_events(
     pr: PullRequestRef, pr_data: Dict[str, Any], current_user: str, author: str, updated_at: str
