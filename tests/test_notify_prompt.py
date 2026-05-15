@@ -35,8 +35,8 @@ def make_event(number=1049, dedupe_suffix="main"):
         ),
         role="reviewer",
         event_type="author_push_after_review",
-        summary=f"teammate pushed new commits to PR #{number}",
-        actor="teammate",
+        summary=f"bang9 pushed new commits to PR #{number}",
+        actor="bang9",
         actionable=True,
         dedupe_key=f"notify-prompt:{number}:{dedupe_suffix}",
         payload={"lastPushedAt": "2026-05-11T10:00:00Z"},
@@ -130,8 +130,8 @@ class NotifyPromptTests(unittest.TestCase):
         self.assertIn("PR Watch: PR #1049 has an update", prompt)
         self.assertIn("PR #1049", prompt)
         self.assertIn("sendbird/ai-agent-js", prompt)
-        self.assertIn("teammate pushed new commits to PR #1049", prompt)
-        self.assertIn("teammate:", prompt)
+        self.assertIn("bang9 pushed new commits to PR #1049", prompt)
+        self.assertIn("bang9:", prompt)
         self.assertIn(PR_URL, prompt)
         self.assertIn("Suggested replies:", prompt)
         self.assertIn("Inspect update", prompt)

@@ -42,8 +42,8 @@ def make_event(number=1049, dedupe_suffix="main"):
         ),
         role="reviewer",
         event_type="author_push_after_review",
-        summary=f"teammate pushed new commits to PR #{number}",
-        actor="teammate",
+        summary=f"bang9 pushed new commits to PR #{number}",
+        actor="bang9",
         actionable=True,
         dedupe_key=f"test:{number}:{dedupe_suffix}",
         payload={"lastPushedAt": "2026-05-11T10:00:00Z"},
@@ -1172,7 +1172,7 @@ class HostAdapterTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {"author": {"login": "irene"}, "state": "COMMENTED", "submittedAt": "2026-05-11T09:00:00Z"}
                     ],

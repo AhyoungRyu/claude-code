@@ -48,8 +48,8 @@ def make_review_event(dedupe_suffix="main"):
         ),
         role="reviewer",
         event_type="author_push_after_review",
-        summary="teammate pushed new commits to PR #1049",
-        actor="teammate",
+        summary="bang9 pushed new commits to PR #1049",
+        actor="bang9",
         actionable=True,
         dedupe_key=f"test:1049:{dedupe_suffix}",
         payload={"lastPushedAt": "2026-05-11T10:00:00Z"},
@@ -69,7 +69,7 @@ def make_inbox_event(owner, repo, number, dedupe_suffix, role="reviewer", event_
         role=role,
         event_type=event_type,
         summary=f"PR #{number} needs attention",
-        actor="teammate",
+        actor="bang9",
         actionable=True,
         dedupe_key=f"test:{owner}/{repo}:{number}:{dedupe_suffix}",
         payload={"lastPushedAt": "2026-05-11T10:00:00Z"},
@@ -179,6 +179,33 @@ class PrWatchTests(unittest.TestCase):
     def test_browser_notification_mode_is_legacy_alias_for_in_app(self):
         self.assertEqual("in_app", resolve_notification_mode("browser", platform_name="Darwin"))
 
+    def test_reviewer_update_summary_uses_github_login(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "url": PR_URL,
+                "title": "Improve the tool runner",
+                "author": {"login": "bang9"},
+                "latestReviews": [
+                    {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z",
+                    }
+                ],
+                "lastPushedAt": "2026-05-11T10:00:00Z",
+                "updatedAt": "2026-05-11T10:00:00Z",
+            },
+            current_user="irene",
+        )
+
+        event = next(item for item in events if item.event_type == "author_push_after_review")
+        self.assertEqual("bang9", event.actor)
+        self.assertEqual("bang9 pushed commits to PR #1049 after your review.", event.summary)
+        self.assertNotIn("teammate", event.summary)
+
     def test_render_notification_keeps_desktop_text_compact(self):
         from pr_watch.notifications import render_notification
 
@@ -187,7 +214,7 @@ class PrWatchTests(unittest.TestCase):
             title, message = render_notification(event)
 
         self.assertEqual("ai-agent-js #1049 needs attention", title)
-        self.assertEqual("teammate pushed new commits to PR #1049", message)
+        self.assertEqual("bang9 pushed new commits to PR #1049", message)
         self.assertNotIn("https://", title + message)
         self.assertNotIn("sendbird/ai-agent-js:", message)
 
@@ -205,7 +232,7 @@ class PrWatchTests(unittest.TestCase):
 
                     result = DesktopNotifier().send(
                         "ai-agent-js #1049 needs attention",
-                        "teammate pushed new commits to PR #1049",
+                        "bang9 pushed new commits to PR #1049",
                         event,
                     )
 
@@ -252,7 +279,7 @@ class PrWatchTests(unittest.TestCase):
 
                         result = DesktopNotifier().send(
                             "ai-agent-js #1049 needs attention",
-                            "teammate pushed new commits to PR #1049",
+                            "bang9 pushed new commits to PR #1049",
                             event,
                             activation_bundle_id="com.conductor.app",
                         )
@@ -276,7 +303,7 @@ class PrWatchTests(unittest.TestCase):
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
                     "isDraft": true,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {
                         "author": {"login": "irene"},
@@ -308,7 +335,7 @@ class PrWatchTests(unittest.TestCase):
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
                     "isDraft": true,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {
                         "author": {"login": "irene"},
@@ -373,7 +400,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -416,7 +443,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -455,7 +482,7 @@ class PrWatchTests(unittest.TestCase):
             "mergeStateStatus": "CLEAN",
             "latestReviews": [
                 {
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "state": "CHANGES_REQUESTED",
                     "submittedAt": "2026-05-11T10:00:00Z",
                 }
@@ -683,7 +710,7 @@ class PrWatchTests(unittest.TestCase):
                     },
                     {
                         "id": "human-comment",
-                        "author": {"login": "teammate"},
+                        "author": {"login": "bang9"},
                         "body": "Can you look at the failing test?",
                         "authorAssociation": "MEMBER",
                         "updatedAt": "2026-05-14T01:46:15Z",
@@ -696,7 +723,7 @@ class PrWatchTests(unittest.TestCase):
 
         comment_events = [event for event in events if event.event_type == "human_comment"]
 
-        self.assertEqual(["teammate"], [event.actor for event in comment_events])
+        self.assertEqual(["bang9"], [event.actor for event in comment_events])
 
     def test_blocked_merge_state_with_mergeable_pr_is_not_a_merge_conflict(self):
         events = classify_pr(
@@ -756,7 +783,7 @@ class PrWatchTests(unittest.TestCase):
                 "repo": "ai-agent-js",
                 "number": 1049,
                 "url": PR_URL,
-                "author": {"login": "teammate"},
+                "author": {"login": "bang9"},
                 "latestReviews": [
                     {
                         "author": {"login": "irene"},
@@ -772,7 +799,7 @@ class PrWatchTests(unittest.TestCase):
                         "comments": [
                             {
                                 "id": 77,
-                                "author": {"login": "teammate"},
+                                "author": {"login": "bang9"},
                                 "body": "Can we also handle Jira links?",
                                 "updatedAt": "2026-05-11T11:00:00Z",
                             }
@@ -788,7 +815,7 @@ class PrWatchTests(unittest.TestCase):
 
         self.assertEqual(1, len(linked_events))
         self.assertEqual("reviewer", linked_events[0].role)
-        self.assertEqual("teammate", linked_events[0].actor)
+        self.assertEqual("bang9", linked_events[0].actor)
         self.assertIn("issue #321", linked_events[0].summary)
         self.assertEqual("github_issue", linked_events[0].payload["source"])
 
@@ -799,7 +826,7 @@ class PrWatchTests(unittest.TestCase):
                 "repo": "ai-agent-js",
                 "number": 1049,
                 "url": PR_URL,
-                "author": {"login": "teammate"},
+                "author": {"login": "bang9"},
                 "latestReviews": [
                     {
                         "author": {"login": "irene"},
@@ -835,7 +862,7 @@ class PrWatchTests(unittest.TestCase):
                 "repo": "ai-agent-js",
                 "number": 1049,
                 "url": PR_URL,
-                "author": {"login": "teammate"},
+                "author": {"login": "bang9"},
                 "latestReviews": [
                     {
                         "author": {"login": "irene"},
@@ -857,7 +884,7 @@ class PrWatchTests(unittest.TestCase):
                             },
                             {
                                 "id": 80,
-                                "author": {"login": "teammate"},
+                                "author": {"login": "bang9"},
                                 "body": "This needs a real follow-up.",
                                 "authorAssociation": "MEMBER",
                                 "updatedAt": "2026-05-11T11:01:00Z",
@@ -872,7 +899,7 @@ class PrWatchTests(unittest.TestCase):
 
         linked_events = [event for event in events if event.event_type == "linked_issue_comment"]
 
-        self.assertEqual(["teammate"], [event.actor for event in linked_events])
+        self.assertEqual(["bang9"], [event.actor for event in linked_events])
 
     def test_explicit_bind_creates_confirmed_binding_used_as_high_confidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -896,7 +923,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1238,7 +1265,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1287,7 +1314,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1335,7 +1362,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1384,7 +1411,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1579,7 +1606,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1625,7 +1652,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1668,7 +1695,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1703,7 +1730,7 @@ class PrWatchTests(unittest.TestCase):
                     "reviewDecision": "CHANGES_REQUESTED",
                     "latestReviews": [
                         {
-                            "author": {"login": "teammate"},
+                            "author": {"login": "bang9"},
                             "state": "CHANGES_REQUESTED",
                             "submittedAt": "2026-05-11T10:00:00Z",
                         }
@@ -1725,7 +1752,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1772,7 +1799,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -1813,7 +1840,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {
                         "author": {"login": "irene"},
@@ -1865,7 +1892,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "updatedAt": "2026-05-12T10:00:00Z"
                   }
                 ]
@@ -2092,7 +2119,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": PR_URL,
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                         {
                             "author": {"login": "irene"},
@@ -2133,7 +2160,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {
                         "author": {"login": "irene"},
@@ -2237,7 +2264,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "ai-agent-js",
                     "number": 1049,
                     "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {
                         "author": {"login": "irene"},
@@ -2633,7 +2660,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "one",
                     "number": 1,
                     "url": "https://github.com/alpha/one/pull/1",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {"author": {"login": "irene"}, "state": "COMMENTED", "submittedAt": "2026-05-11T09:00:00Z"}
                     ],
@@ -2645,7 +2672,7 @@ class PrWatchTests(unittest.TestCase):
                     "repo": "two",
                     "number": 2,
                     "url": "https://github.com/beta/two/pull/2",
-                    "author": {"login": "teammate"},
+                    "author": {"login": "bang9"},
                     "latestReviews": [
                       {"author": {"login": "irene"}, "state": "COMMENTED", "submittedAt": "2026-05-11T09:00:00Z"}
                     ],
