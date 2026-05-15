@@ -701,15 +701,20 @@ class HostAdapterTests(unittest.TestCase):
                     "select content from session_messages where role = 'assistant'"
                 ).fetchone()[0]
             self.assertIn("PR Watch: Is this the right session", user_content)
+            self.assertIn("sendbird/ai-agent-js#1049", user_content)
+            self.assertIn("bang9 pushed new commits to PR #1049", user_content)
             self.assertIn("Suggested replies:", user_content)
             self.assertIn("Confirm this session", user_content)
             self.assertIn("Confirm and mark handled", user_content)
             self.assertIn("Not this session", user_content)
             self.assertIn("Ignore this update", user_content)
+            self.assertNotIn("requested attention", user_content)
+            self.assertNotIn("Link:", user_content)
+            self.assertNotIn("Event id:", user_content)
+            self.assertNotIn("pr-watch:", user_content)
             self.assertNotIn("No PR inspection", user_content)
             self.assertIn("Do not run tools or read files", user_content)
             self.assertIn("unless the user chooses Confirm this session", user_content)
-            self.assertIn("pr-watch:prompt_version=2", user_content)
             payload = json.loads(assistant_content)
             labels = [item["label"] for item in payload["suggested_replies"]]
             self.assertEqual(

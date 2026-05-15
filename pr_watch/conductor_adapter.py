@@ -158,6 +158,7 @@ def _mirror_message_to_conductor(
                 assistant_text,
                 session_id=binding.session_id,
                 message_id=message_id,
+                marker={"marker": marker} if marker.startswith("pr-watch:confirm_event_id=") else None,
             )
             _insert_synthetic_message(
                 conn,
@@ -286,9 +287,8 @@ def _render_confirmation_user_prompt(event: InboxItem) -> str:
         [
             f"PR Watch: Is this the right session for PR #{event.pr_number}?",
             "",
-            f"{event.actor} requested attention on {event.repo_owner}/{event.repo_name}#{event.pr_number}.",
-            f"Event: {event.summary}",
-            f"Link: {event.pr_url}",
+            f"{event.repo_owner}/{event.repo_name}#{event.pr_number}",
+            event.summary,
             "",
             "Suggested replies:",
             "- Confirm this session",
@@ -296,11 +296,7 @@ def _render_confirmation_user_prompt(event: InboxItem) -> str:
             "- Not this session",
             "- Ignore this update",
             "",
-            f"Event id: {event.event_id}",
-            "",
             "Do not run tools or read files unless the user chooses Confirm this session or Confirm and mark handled; wait for one of the suggested replies.",
-            f"pr-watch:confirm_event_id={event.event_id}",
-            f"pr-watch:prompt_version={PROMPT_VERSION}",
         ]
     )
 
@@ -334,6 +330,12 @@ def _render_assistant_payload(
     marker: Optional[dict[str, str]] = None,
 ) -> str:
     suggested_replies = _suggested_replies_for_event(event)
+    pr_watch_payload = {
+        "event_id": event.event_id,
+        "prompt_version": PROMPT_VERSION,
+    }
+    if marker:
+        pr_watch_payload.update(marker)
     return json.dumps(
         {
             "type": "assistant",
@@ -348,10 +350,7 @@ def _render_assistant_payload(
                     {"text": item["label"], "value": item["message"]} for item in suggested_replies
                 ],
             },
-            "pr_watch": {
-                "event_id": event.event_id,
-                "prompt_version": PROMPT_VERSION,
-            },
+            "pr_watch": pr_watch_payload,
         },
         ensure_ascii=False,
     )
