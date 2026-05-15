@@ -31,10 +31,13 @@ from .setup import detect_current_repo
 from .sessions import discover_sessions
 from .state import StateStore
 from .util import normalize_repo_full_name
-from .workflow import confirm_binding_for_event as workflow_confirm_binding_for_event
-from .workflow import create_explicit_binding
-from .workflow import dismiss_event as workflow_dismiss_event
-from .workflow import reject_binding_for_event as workflow_reject_binding_for_event
+from .workflow import (
+    confirm_binding_and_mark_handled as workflow_confirm_binding_and_mark_handled,
+    confirm_binding_for_event as workflow_confirm_binding_for_event,
+    create_explicit_binding,
+    dismiss_event as workflow_dismiss_event,
+    reject_binding_for_event as workflow_reject_binding_for_event,
+)
 
 
 INIT_PROFILE_NOTIFICATION_MODES = {
@@ -72,17 +75,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "confirm-binding":
             store = StateStore(state_db_path(args.state_dir))
             config = load_config(args.state_dir)
-            result = workflow_confirm_binding_for_event(
-                store,
-                args.event_id,
-                session_id=args.session_id,
-                mirror_now=args.mirror_now,
-                trigger=args.trigger,
-                host=args.host,
-                conductor_db_path=args.conductor_db,
-                session_state=args.session_state,
-                busy_policy=args.busy_policy or config.get("busy_policy", DEFAULT_BUSY_POLICY),
-            )
+            if args.mark_handled:
+                result = workflow_confirm_binding_and_mark_handled(
+                    store,
+                    args.event_id,
+                    session_id=args.session_id,
+                )
+            else:
+                result = workflow_confirm_binding_for_event(
+                    store,
+                    args.event_id,
+                    session_id=args.session_id,
+                    mirror_now=args.mirror_now,
+                    trigger=args.trigger,
+                    host=args.host,
+                    conductor_db_path=args.conductor_db,
+                    session_state=args.session_state,
+                    busy_policy=args.busy_policy or config.get("busy_policy", DEFAULT_BUSY_POLICY),
+                )
             binding = result["binding"]
             print(f"{result['action']}: {args.event_id}")
             print(f"binding: {binding.agent}:{binding.session_id}")
@@ -320,6 +330,11 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("event_id")
     confirm.add_argument("--session-id", help="confirm or reassign to this session for the same PR and role")
     confirm.add_argument("--no-mirror", dest="mirror_now", action="store_false", default=True)
+    confirm.add_argument(
+        "--mark-handled",
+        action="store_true",
+        help="confirm the binding and dismiss the current event as already handled",
+    )
     confirm.add_argument("--host", choices=["conductor"], default="conductor")
     confirm.add_argument("--conductor-db", help="override Conductor SQLite DB path for immediate mirror")
     confirm.add_argument("--trigger", action="store_true", help="also approve/queue/resume after confirming")

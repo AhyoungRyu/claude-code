@@ -132,6 +132,36 @@ def confirm_binding_for_event(
     }
 
 
+def confirm_binding_and_mark_handled(
+    store: StateStore,
+    event_id: str,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    event = store.get_event(event_id)
+    binding = binding_for_confirmation(store, event, session_id=session_id)
+    source = (
+        "user_confirmed_rebind_handled"
+        if event.delivery_status == "awaiting_rebind_confirmation"
+        else "user_confirmed_handled"
+    )
+    confirmed = store.confirm_binding(binding.binding_id, source=source)
+    updated = store.update_event(
+        event.event_id,
+        status="dismissed",
+        delivery_status="user_marked_handled",
+        binding_id=confirmed.binding_id,
+        confidence="high",
+        evidence=event.evidence
+        + [
+            f"user confirmed active binding {confirmed.agent}:{confirmed.session_id}",
+            "user confirmed binding and marked event handled",
+        ],
+        recovery_command="",
+        error="User confirmed the session binding and marked this PR Watch event handled.",
+    )
+    return {"action": "confirmed_and_marked_handled", "event": updated, "binding": confirmed}
+
+
 def reject_binding_for_event(
     store: StateStore,
     event_id: str,

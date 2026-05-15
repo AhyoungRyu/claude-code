@@ -123,6 +123,7 @@ Confirm an inferred or rebind candidate without approving delivery:
 
 ```bash
 pr-watch confirm-binding evt_123 --no-mirror
+pr-watch confirm-binding evt_123 --mark-handled --no-mirror
 pr-watch confirm-binding evt_123 --conductor-db "$HOME/Library/Application Support/com.conductor.app/conductor.db"
 ```
 
@@ -138,6 +139,9 @@ pr-watch dismiss-event evt_123
 current event to Conductor immediately when a Conductor DB is available. It does
 not resume or queue the session unless `--trigger` is passed. Use `approve`
 when you are ready to deliver work to the confirmed session.
+Use `--mark-handled` when the candidate session is correct but the current
+update was already handled elsewhere; this confirms the binding and dismisses
+only that event as `user_marked_handled`.
 `reject-binding` marks only the inferred session candidate as wrong and leaves
 the event pending for another match. `dismiss-event` closes that single PR Watch
 event without inspecting the PR or taking GitHub action.
@@ -155,12 +159,12 @@ prompts remain pending and inbox-only until the user explicitly confirms,
 rejects, dismisses, or approves them.
 
 Conductor prompts include concise suggested replies. Confirmation prompts offer
-`Confirm this session`, `Not this session`, and `Ignore this update`; confirmed
-update prompts offer `Inspect update`, `Queue for later`, and
-`Ignore this update`. PR Watch stores best-effort `suggested_replies` metadata
-for hosts that render clickable replies, and also includes the same choices as
-plain text so Codex, Claude Code, and terminal sessions still work when the host
-does not render native buttons.
+`Confirm this session`, `Confirm and mark handled`, `Not this session`, and
+`Ignore this update`; confirmed update prompts offer `Inspect update`,
+`Queue for later`, and `Ignore this update`. PR Watch stores best-effort
+`suggested_replies` metadata for hosts that render clickable replies, and also
+includes the same choices as plain text so Codex, Claude Code, and terminal
+sessions still work when the host does not render native buttons.
 
 The same bridge is exposed through MCP as `host_status` and `sync_host_once`
 for hosts that can explicitly call MCP tools. These tools still do not make the
@@ -304,6 +308,17 @@ Confirm an inferred binding or active-handler rebind without delivery:
 }
 ```
 
+Confirm the binding while dismissing the current already-handled event:
+
+```json
+{
+  "tool": "confirm_binding_and_mark_handled",
+  "arguments": {
+    "event_id": "evt_123"
+  }
+}
+```
+
 Reject a wrong session candidate or dismiss a single event:
 
 ```json
@@ -349,6 +364,7 @@ Useful MCP tools:
 | `check_pr_updates` | Poll GitHub once and record actionable PR events |
 | `show_pending_pr_actions` | Show events waiting for user approval or binding |
 | `confirm_binding_for_event` | Confirm or reassign the active PR/session binding without delivery |
+| `confirm_binding_and_mark_handled` | Confirm the binding and dismiss the current already-handled event |
 | `reject_binding_for_event` | Reject the inferred session candidate while keeping the event pending |
 | `dismiss_event` | Dismiss one event without inspecting the PR or taking GitHub action |
 | `approve_resume_session` | Approve delivery to the matched session |

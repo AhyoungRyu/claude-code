@@ -861,6 +861,55 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("high", stored.confidence)
             self.assertEqual([], store.list_queue())
 
+    def test_confirm_binding_and_mark_handled_confirms_then_dismisses_event(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import confirm_binding_and_mark_handled
+
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="author",
+                agent="claude",
+                session_id="claude-candidate",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = make_inbox_event(
+                "sendbird",
+                "ai-agent-js",
+                1049,
+                "handled",
+                role="author",
+                event_type="human_review_comment",
+            )
+            inbox_item = store.upsert_event(
+                event,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["candidate"],
+            )
+
+            result = confirm_binding_and_mark_handled(
+                event_id=inbox_item.event_id,
+                state_dir=tmpdir,
+            )
+
+            stored = store.get_event(inbox_item.event_id)
+            binding = store.get_binding(candidate.binding_id)
+            self.assertEqual("confirmed_and_marked_handled", result["action"])
+            self.assertTrue(binding.confirmed)
+            self.assertTrue(binding.active)
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("user_marked_handled", stored.delivery_status)
+            self.assertIn("user confirmed binding and marked event handled", stored.evidence)
+            self.assertEqual([], store.list_queue())
+
     def test_cli_confirm_binding_can_select_candidate_without_triggering_delivery(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
@@ -892,6 +941,50 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("confirmed_binding", output.getvalue())
             self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
+            self.assertEqual([], store.list_queue())
+
+    def test_cli_confirm_binding_can_mark_current_event_handled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            inbox_item = store.upsert_event(
+                make_review_event("handled-cli"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["candidate"],
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--state-dir",
+                        tmpdir,
+                        "confirm-binding",
+                        inbox_item.event_id,
+                        "--mark-handled",
+                        "--no-mirror",
+                    ]
+                )
+
+            self.assertEqual(0, code)
+            self.assertIn("confirmed_and_marked_handled", output.getvalue())
+            self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
+            self.assertEqual("dismissed", store.get_event(inbox_item.event_id).status)
+            self.assertEqual("user_marked_handled", store.get_event(inbox_item.event_id).delivery_status)
             self.assertEqual([], store.list_queue())
 
     def test_mcp_reject_binding_for_event_keeps_event_pending_without_candidate(self):

@@ -703,6 +703,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("PR Watch: Is this the right session", user_content)
             self.assertIn("Suggested replies:", user_content)
             self.assertIn("Confirm this session", user_content)
+            self.assertIn("Confirm and mark handled", user_content)
             self.assertIn("Not this session", user_content)
             self.assertIn("Ignore this update", user_content)
             self.assertNotIn("No PR inspection", user_content)
@@ -711,7 +712,12 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("pr-watch:prompt_version=2", user_content)
             payload = json.loads(assistant_content)
             labels = [item["label"] for item in payload["suggested_replies"]]
-            self.assertEqual(["Confirm this session", "Not this session", "Ignore this update"], labels)
+            self.assertEqual(
+                ["Confirm this session", "Confirm and mark handled", "Not this session", "Ignore this update"],
+                labels,
+            )
+            actions = [item["action"] for item in payload["suggested_replies"]]
+            self.assertIn("confirm_binding_and_mark_handled", actions)
             self.assertEqual("2", payload["pr_watch"]["prompt_version"])
             assistant_text = payload["message"]["content"][0]["text"]
             self.assertIn("I found a likely PR Watch session match", assistant_text)

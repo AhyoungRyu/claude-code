@@ -13,10 +13,13 @@ from .host_adapter import sync_once as host_bridge_sync_once
 from .notifications import notify_event, resolve_notification_mode
 from .sessions import discover_sessions
 from .state import StateStore
-from .workflow import confirm_binding_for_event as workflow_confirm_binding_for_event
-from .workflow import create_explicit_binding
-from .workflow import dismiss_event as workflow_dismiss_event
-from .workflow import reject_binding_for_event as workflow_reject_binding_for_event
+from .workflow import (
+    confirm_binding_and_mark_handled as workflow_confirm_binding_and_mark_handled,
+    confirm_binding_for_event as workflow_confirm_binding_for_event,
+    create_explicit_binding,
+    dismiss_event as workflow_dismiss_event,
+    reject_binding_for_event as workflow_reject_binding_for_event,
+)
 
 
 _DEFAULT_STATE_DIR: Optional[str] = None
@@ -128,6 +131,22 @@ def confirm_binding_for_event(
         conductor_db_path=conductor_db_path,
         session_state=session_state,
         busy_policy=busy_policy or config.get("busy_policy", "run_if_idle_queue_if_busy"),
+    )
+    return _to_json(result)
+
+
+def confirm_binding_and_mark_handled(
+    event_id: str,
+    session_id: Optional[str] = None,
+    state_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Confirm the PR/session binding and dismiss the current event as already handled."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    result = workflow_confirm_binding_and_mark_handled(
+        store,
+        event_id,
+        session_id=session_id,
     )
     return _to_json(result)
 
@@ -337,6 +356,7 @@ def build_server() -> Any:
     server.tool()(show_pending_pr_actions)
     server.tool()(bind_pr)
     server.tool()(confirm_binding_for_event)
+    server.tool()(confirm_binding_and_mark_handled)
     server.tool()(reject_binding_for_event)
     server.tool()(dismiss_event)
     server.tool()(approve)

@@ -268,14 +268,16 @@ def render_confirmation_prompt(event: InboxItem, binding: Binding) -> str:
             "",
             "Suggested replies:",
             "- Confirm this session",
+            "- Confirm and mark handled",
             "- Not this session",
             "- Ignore this update",
             "",
             f"Confirmation event id: {event.event_id}",
             f"Candidate session: {binding.agent}:{binding.session_id}",
             f"Confirm command: pr-watch confirm-binding {event.event_id}",
+            f"Confirm handled command: pr-watch confirm-binding {event.event_id} --mark-handled",
             "",
-            "Do not run tools or read files unless the user chooses Confirm this session; wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
+            "Do not run tools or read files unless the user chooses Confirm this session or Confirm and mark handled; wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
         ]
     )
 

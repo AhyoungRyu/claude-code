@@ -260,6 +260,7 @@ def render_conductor_confirmation_turn(event: InboxItem) -> tuple[str, str]:
             "",
             "Choose one:",
             "- Confirm this session: bind future updates here.",
+            "- Confirm and mark handled: bind future updates here and dismiss this already-handled update.",
             "- Not this session: reject this match and keep the event pending.",
             "- Ignore this update: dismiss this notification.",
             "",
@@ -291,12 +292,13 @@ def _render_confirmation_user_prompt(event: InboxItem) -> str:
             "",
             "Suggested replies:",
             "- Confirm this session",
+            "- Confirm and mark handled",
             "- Not this session",
             "- Ignore this update",
             "",
             f"Event id: {event.event_id}",
             "",
-            "Do not run tools or read files unless the user chooses Confirm this session; wait for one of the suggested replies.",
+            "Do not run tools or read files unless the user chooses Confirm this session or Confirm and mark handled; wait for one of the suggested replies.",
             f"pr-watch:confirm_event_id={event.event_id}",
             f"pr-watch:prompt_version={PROMPT_VERSION}",
         ]
@@ -359,6 +361,7 @@ def _suggested_replies_for_event(event: InboxItem) -> list[dict[str, str]]:
     if event.status == "needs_confirmation":
         return [
             _suggested_reply("Confirm this session", event.event_id, "confirm_binding_for_event"),
+            _suggested_reply("Confirm and mark handled", event.event_id, "confirm_binding_and_mark_handled"),
             _suggested_reply("Not this session", event.event_id, "reject_binding_for_event"),
             _suggested_reply("Ignore this update", event.event_id, "dismiss_event"),
         ]

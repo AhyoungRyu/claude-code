@@ -181,6 +181,7 @@ class NotifyPromptTests(unittest.TestCase):
 
         self.assertIn("Suggested replies:", prompt)
         self.assertIn("Confirm this session", prompt)
+        self.assertIn("Confirm and mark handled", prompt)
         self.assertIn("Not this session", prompt)
         self.assertIn("Ignore this update", prompt)
         self.assertIn("Do not run tools or read files", prompt)
