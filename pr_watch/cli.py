@@ -857,7 +857,7 @@ def doctor(state_dir: Optional[str]) -> int:
     print(f"busy_policy: {config.get('busy_policy')}")
     print(f"include_drafts: {config.get('include_drafts')}")
     print(f"notification_mode: {config.get('notification_mode')}")
-    for executable in ["gh", "claude", "codex", "osascript"]:
+    for executable in ["gh", "claude", "codex", "osascript", "terminal-notifier"]:
         path = shutil.which(executable)
         print(f"{executable}: {path or 'not found'}")
     if shutil.which("gh"):

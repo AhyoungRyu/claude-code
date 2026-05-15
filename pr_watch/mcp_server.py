@@ -340,7 +340,7 @@ def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
         "busy_policy": config.get("busy_policy"),
         "include_drafts": config.get("include_drafts"),
         "notification_mode": config.get("notification_mode"),
-        "executables": {name: shutil.which(name) for name in ["gh", "claude", "codex", "osascript"]},
+        "executables": {name: shutil.which(name) for name in ["gh", "claude", "codex", "osascript", "terminal-notifier"]},
         "gh_auth": gh_auth,
         "conductor": "optional, not required",
     }

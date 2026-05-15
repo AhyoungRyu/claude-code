@@ -168,12 +168,101 @@ class PrWatchTests(unittest.TestCase):
             "in_app",
             resolve_notification_mode("auto", host="codex_app", platform_name="Darwin"),
         )
+        self.assertEqual(
+            "in_app",
+            resolve_notification_mode("auto", host="codex-app", platform_name="Darwin"),
+        )
 
     def test_auto_notification_mode_uses_desktop_for_plain_macos_terminal(self):
         self.assertEqual("desktop", resolve_notification_mode("auto", platform_name="Darwin"))
 
     def test_browser_notification_mode_is_legacy_alias_for_in_app(self):
         self.assertEqual("in_app", resolve_notification_mode("browser", platform_name="Darwin"))
+
+    def test_render_notification_keeps_desktop_text_compact(self):
+        from pr_watch.notifications import render_notification
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+            title, message = render_notification(event)
+
+        self.assertEqual("ai-agent-js #1049 needs attention", title)
+        self.assertEqual("teammate pushed new commits to PR #1049", message)
+        self.assertNotIn("https://", title + message)
+        self.assertNotIn("sendbird/ai-agent-js:", message)
+
+    def test_desktop_notification_omits_pr_url_from_macos_script(self):
+        from pr_watch.notifications import DesktopNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+
+            with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
+                with patch("pr_watch.notifications.subprocess.run") as run:
+                    run.return_value.returncode = 0
+                    run.return_value.stderr = ""
+                    run.return_value.stdout = ""
+
+                    result = DesktopNotifier().send(
+                        "ai-agent-js #1049 needs attention",
+                        "teammate pushed new commits to PR #1049",
+                        event,
+                    )
+
+        script = run.call_args.args[0][2]
+        self.assertTrue(result.ok)
+        self.assertNotIn(event.pr_url, script)
+        self.assertNotIn("subtitle", script)
+
+    def test_desktop_notification_uses_terminal_notifier_activation_when_host_is_known(self):
+        from pr_watch.notifications import RecordingNotifier, notify_event
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                host="conductor",
+            )
+            inbox_item = route_event(store, make_review_event("activation"), sessions=[])
+            notifier = RecordingNotifier()
+
+            result = notify_event(store, inbox_item.event_id, mode="desktop", notifier=notifier)
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
+
+    def test_desktop_notifier_activates_host_with_terminal_notifier_when_available(self):
+        from pr_watch.notifications import DesktopNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+
+            with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
+                with patch("pr_watch.notifications.shutil.which", return_value="/opt/homebrew/bin/terminal-notifier"):
+                    with patch("pr_watch.notifications.subprocess.run") as run:
+                        run.return_value.returncode = 0
+                        run.return_value.stderr = ""
+                        run.return_value.stdout = ""
+
+                        result = DesktopNotifier().send(
+                            "ai-agent-js #1049 needs attention",
+                            "teammate pushed new commits to PR #1049",
+                            event,
+                            activation_bundle_id="com.conductor.app",
+                        )
+
+        command = run.call_args.args[0]
+        self.assertTrue(result.ok)
+        self.assertEqual("/opt/homebrew/bin/terminal-notifier", command[0])
+        self.assertIn("-activate", command)
+        self.assertEqual("com.conductor.app", command[command.index("-activate") + 1])
+        self.assertNotIn(event.pr_url, command)
 
     def test_poll_once_skips_draft_prs_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:

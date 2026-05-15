@@ -394,11 +394,17 @@ pr-watch notifications
 
 The default `auto` mode resolves to `in_app` for app-style hosts such as MCP,
 Conductor, or Codex App adapters, and to `desktop` for plain macOS terminal
-usage. The `desktop` channel uses the local macOS notification bridge. The
-`in_app` channel writes a durable local notification inbox that MCP, Codex App,
-or Conductor adapters can consume without approving, resuming, or queueing the
-agent session. The old `browser` value is still accepted as a legacy alias for
-`in_app`.
+usage. The `desktop` channel uses the local macOS notification bridge with a
+compact title such as `ai-agent-js #1049 needs attention` and the event summary
+as the body; the PR URL stays in local state instead of the visible notification
+text. If `terminal-notifier` is installed and the binding has a known host such
+as Conductor, Codex App, Warp, Terminal, or iTerm, PR Watch asks macOS to
+activate that app when the notification is clicked. The built-in `osascript`
+fallback cannot control click behavior, so it only sends the compact
+notification. The `in_app` channel writes a durable local notification inbox
+that MCP, Codex App, or Conductor adapters can consume without approving,
+resuming, or queueing the agent session. The old `browser` value is still
+accepted as a legacy alias for `in_app`.
 
 Common configuration:
 

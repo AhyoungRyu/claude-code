@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
-from .models import InboxItem, NotificationResult
+from .models import Binding, InboxItem, NotificationResult
 from .state import StateStore
 
 
 VALID_NOTIFICATION_MODES = {"none", "desktop", "in_app", "both", "auto", "browser"}
-APP_HOSTS = {"conductor", "codex_app", "mcp"}
+APP_HOSTS = {"conductor", "codex-app", "codex_app", "mcp"}
+HOST_ACTIVATION_BUNDLE_IDS = {
+    "conductor": "com.conductor.app",
+    "codex-app": "com.openai.codex",
+    "codex_app": "com.openai.codex",
+    "warp": "dev.warp.Warp-Stable",
+    "terminal-warp": "dev.warp.Warp-Stable",
+    "terminal": "com.apple.Terminal",
+    "iterm": "com.googlecode.iterm2",
+    "iterm2": "com.googlecode.iterm2",
+}
 
 
 @dataclass(frozen=True)
@@ -20,13 +31,36 @@ class NotificationSendResult:
 
 
 class DesktopNotifier:
-    def send(self, title: str, message: str, event: InboxItem) -> NotificationSendResult:
+    def send(
+        self,
+        title: str,
+        message: str,
+        event: InboxItem,
+        activation_bundle_id: Optional[str] = None,
+    ) -> NotificationSendResult:
         if platform.system() != "Darwin":
             return NotificationSendResult(False, "desktop notifications currently use macOS osascript")
+        terminal_notifier = shutil.which("terminal-notifier")
+        if terminal_notifier and activation_bundle_id:
+            command = [
+                terminal_notifier,
+                "-title",
+                title,
+                "-message",
+                message,
+                "-group",
+                event.event_id,
+                "-activate",
+                activation_bundle_id,
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return NotificationSendResult(True)
+            return NotificationSendResult(False, result.stderr.strip() or result.stdout.strip())
+
         script = (
             f"display notification {_applescript_string(message)} "
-            f"with title {_applescript_string(title)} "
-            f"subtitle {_applescript_string(event.pr_url)}"
+            f"with title {_applescript_string(title)}"
         )
         result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
         if result.returncode == 0:
@@ -39,8 +73,21 @@ class RecordingNotifier:
         self.result = result or NotificationSendResult(True)
         self.messages: List[dict] = []
 
-    def send(self, title: str, message: str, event: InboxItem) -> NotificationSendResult:
-        self.messages.append({"title": title, "message": message, "event_id": event.event_id})
+    def send(
+        self,
+        title: str,
+        message: str,
+        event: InboxItem,
+        activation_bundle_id: Optional[str] = None,
+    ) -> NotificationSendResult:
+        self.messages.append(
+            {
+                "title": title,
+                "message": message,
+                "event_id": event.event_id,
+                "activation_bundle_id": activation_bundle_id,
+            }
+        )
         return self.result
 
 
@@ -71,7 +118,9 @@ def notify_event(
         return NotificationResult("skipped", event_id, message="notification mode is none")
 
     event = store.get_event(event_id)
+    binding = store.get_binding(event.binding_id) if event.binding_id else None
     title, message = render_notification(event)
+    activation_bundle_id = activation_bundle_id_for_binding(binding)
     delivered: List[str] = []
     failures: List[str] = []
     skipped: List[str] = []
@@ -94,7 +143,7 @@ def notify_event(
             continue
 
         sender = notifier or DesktopNotifier()
-        result = sender.send(title, message, event)
+        result = sender.send(title, message, event, activation_bundle_id=activation_bundle_id)
         status = "sent" if result.ok else "failed"
         store.upsert_notification(
             event_id=event_id,
@@ -118,9 +167,15 @@ def notify_event(
 
 
 def render_notification(event: InboxItem) -> tuple[str, str]:
-    title = f"PR #{event.pr_number} needs attention"
-    message = f"{event.repo_owner}/{event.repo_name}: {event.summary}"
+    title = f"{event.repo_name} #{event.pr_number} needs attention"
+    message = event.summary
     return title, message
+
+
+def activation_bundle_id_for_binding(binding: Optional[Binding]) -> Optional[str]:
+    if binding is None or not binding.host:
+        return None
+    return HOST_ACTIVATION_BUNDLE_IDS.get(binding.host.strip().lower())
 
 
 def normalize_notification_mode(mode: str) -> str:
