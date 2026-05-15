@@ -1353,6 +1353,44 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("codex-newer", binding.session_id)
             self.assertIn("preferred newest matching session", " ".join(inbox_item.evidence))
 
+    def test_pr_review_session_beats_newer_pr_listing_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = make_inbox_event("sendbird", "ai-agent-js", 1057, "author-push")
+            listing_session = SessionInfo(
+                agent="claude",
+                session_id="show-pending-prs",
+                title="Show pending PRs",
+                cwd="/repo/ai-agent-js",
+                branch="review-PRs",
+                text=(
+                    "gh search prs --repo=sendbird/ai-agent-js --state=open --review-requested=@me\n"
+                    "| #1057 | Review needed | https://github.com/sendbird/ai-agent-js/pull/1057 |\n"
+                    "| #1058 | Review needed | https://github.com/sendbird/ai-agent-js/pull/1058 |"
+                ),
+                last_activity_at="2026-05-15T06:09:00Z",
+            )
+            review_session = SessionInfo(
+                agent="codex",
+                session_id="review-1057",
+                title="Review 1057",
+                cwd="/repo/ai-agent-js",
+                branch="review-pr-bang9",
+                text=(
+                    "Separate verification passed.\n"
+                    "origin/pr/1057 packages/messenger-react/src/contexts/AgentProviderContainer.tsx\n"
+                    "Posted inline comment: https://github.com/sendbird/ai-agent-js/pull/1057#discussion_r3245899037"
+                ),
+                last_activity_at="2026-05-15T04:26:29Z",
+            )
+
+            inbox_item = route_event(store, event, sessions=[listing_session, review_session])
+            binding = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("review-1057", binding.session_id)
+            self.assertIn("session title is focused on PR #1057", " ".join(inbox_item.evidence))
+
     def test_active_session_beats_newer_inactive_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,12 +21,13 @@ class SessionCandidate:
     evidence: List[str]
     rank: int
     active_rank: int
+    focus_score: int
     evidence_score: int
     activity_ts: float
 
     @property
-    def decisive_key(self) -> Tuple[int, int, int, float]:
-        return (self.rank, self.active_rank, self.evidence_score, self.activity_ts)
+    def decisive_key(self) -> Tuple[int, int, int, int, float]:
+        return (self.rank, self.focus_score, self.active_rank, self.evidence_score, self.activity_ts)
 
 
 @dataclass(frozen=True)
@@ -457,6 +459,7 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
                     evidence=evidence,
                     rank=rank,
                     active_rank=1 if is_active_or_focused_session(session) else 0,
+                    focus_score=session_focus_score(pr, session),
                     evidence_score=len(evidence),
                     activity_ts=session_activity_ts(session),
                 )
@@ -467,6 +470,7 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
     ranked.sort(
         key=lambda candidate: (
             candidate.rank,
+            candidate.focus_score,
             candidate.active_rank,
             candidate.evidence_score,
             candidate.activity_ts,
@@ -486,6 +490,7 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
         evidence=annotated_selection_evidence(best, ranked),
         rank=best.rank,
         active_rank=best.active_rank,
+        focus_score=best.focus_score,
         evidence_score=best.evidence_score,
         activity_ts=best.activity_ts,
     )
@@ -499,6 +504,8 @@ def annotated_selection_evidence(best: SessionCandidate, ranked: List[SessionCan
         return evidence
     if best.active_rank and any(peer.active_rank < best.active_rank for peer in peers):
         evidence.append("preferred active or focused session over other matching candidates")
+    if best.focus_score and all(best.focus_score > peer.focus_score for peer in peers):
+        evidence.append("preferred PR-focused session over PR listing or triage candidates")
     if best.activity_ts and all(best.activity_ts > peer.activity_ts for peer in peers):
         evidence.append("preferred newest matching session by last_activity_at")
     if all(best.evidence_score > peer.evidence_score for peer in peers):
@@ -536,11 +543,18 @@ def score_session(pr: PullRequestRef, session: SessionInfo) -> Tuple[str, List[s
         evidence.append(f"session cwd matches repo name {pr.repo}")
     if pr.head_ref and pr.head_ref.lower() in session.branch.lower():
         evidence.append(f"session branch resembles PR head branch {pr.head_ref}")
+    focus_evidence = pr_focused_session_evidence(pr, session)
+    if focus_evidence:
+        evidence.extend(focus_evidence)
+    if looks_like_pr_listing_session(pr, session) and not focus_evidence:
+        evidence.append("session appears to list or triage multiple PRs rather than handle this PR")
 
     exact_pr = any("PR URL" in item or f"PR #{pr.number}" in item for item in evidence)
     repo_match = any("repo" in item or "cwd" in item for item in evidence)
     branch_match = any("branch" in item for item in evidence)
 
+    if looks_like_pr_listing_session(pr, session) and not focus_evidence:
+        return ("low", evidence) if repo_match else ("none", [])
     if exact_pr and repo_match:
         return "high", evidence
     if exact_pr:
@@ -550,6 +564,51 @@ def score_session(pr: PullRequestRef, session: SessionInfo) -> Tuple[str, List[s
     if repo_match:
         return "low", evidence
     return "none", []
+
+
+def session_focus_score(pr: PullRequestRef, session: SessionInfo) -> int:
+    return len(pr_focused_session_evidence(pr, session))
+
+
+def pr_focused_session_evidence(pr: PullRequestRef, session: SessionInfo) -> List[str]:
+    title = session.title.lower()
+    haystack = " ".join([session.title, session.branch, session.text]).lower()
+    evidence: List[str] = []
+    if re.search(rf"\b(?:review|fix|check|handle|resume)\s+(?:pr\s*)?#?{pr.number}\b", title):
+        evidence.append(f"session title is focused on PR #{pr.number}")
+    if re.search(rf"\b(?:origin/)?pr[-/]{pr.number}\b", haystack):
+        evidence.append(f"session work references PR branch {pr.number}")
+    if f"pull/{pr.number}#discussion_r" in haystack:
+        evidence.append(f"session references a review discussion on PR #{pr.number}")
+    if f"/pulls/{pr.number}/comments" in haystack or (
+        "pulls/comments" in haystack and f"pull/{pr.number}" in haystack
+    ):
+        evidence.append(f"session performed review comment work for PR #{pr.number}")
+    return evidence
+
+
+def looks_like_pr_listing_session(pr: PullRequestRef, session: SessionInfo) -> bool:
+    title = session.title.lower()
+    haystack = " ".join([session.title, session.text]).lower()
+    if re.search(r"\b(show|list|find|search)\s+(?:pending\s+|open\s+)?prs?\b", title):
+        return True
+    listing_markers = (
+        "gh search prs",
+        "--review-requested",
+        "--reviewed-by",
+        "review-requested",
+        "reviewed-by",
+        "list open prs",
+        "open prs in",
+    )
+    if any(marker in haystack for marker in listing_markers) and _distinct_pr_mentions(haystack) >= 3:
+        return True
+    return False
+
+
+def _distinct_pr_mentions(text: str) -> int:
+    numbers = set(re.findall(r"(?:#|pr\s+|pull/)(\d{1,7})", text, flags=re.IGNORECASE))
+    return len(numbers)
 
 
 def is_active_or_focused_session(session: SessionInfo) -> bool:
