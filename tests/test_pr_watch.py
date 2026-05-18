@@ -206,6 +206,133 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual("bang9 pushed commits to PR #1049 after your review.", event.summary)
         self.assertNotIn("teammate", event.summary)
 
+    def test_reviewer_author_replies_are_coalesced_per_actor(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "url": PR_URL,
+                "title": "Improve the tool runner",
+                "author": {"login": "bang9"},
+                "latestReviews": [
+                    {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z",
+                    }
+                ],
+                "authorReplies": [
+                    {
+                        "id": "reply-1",
+                        "author": {"login": "bang9"},
+                        "body": "Fixed the first part.",
+                        "updatedAt": "2026-05-11T10:00:00Z",
+                    },
+                    {
+                        "id": "reply-2",
+                        "author": {"login": "bang9"},
+                        "body": "Added the test too.",
+                        "updatedAt": "2026-05-11T10:03:00Z",
+                    },
+                    {
+                        "id": "reply-3",
+                        "author": {"login": "bang9"},
+                        "body": "Ready for another look.",
+                        "updatedAt": "2026-05-11T10:05:00Z",
+                    },
+                ],
+                "updatedAt": "2026-05-11T10:05:00Z",
+            },
+            current_user="irene",
+        )
+
+        reply_events = [event for event in events if event.event_type == "author_reply"]
+
+        self.assertEqual(1, len(reply_events))
+        self.assertEqual("bang9 replied 3 times on PR #1049.", reply_events[0].summary)
+        self.assertEqual(["reply-1", "reply-2", "reply-3"], reply_events[0].payload["reply_ids"])
+        self.assertEqual("reply-3", reply_events[0].payload["reply_id"])
+        self.assertEqual("author_reply:bang9", reply_events[0].payload["condition_key"])
+
+    def test_reviewer_thread_state_changes_are_coalesced_per_state_and_actor(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "url": PR_URL,
+                "title": "Improve the tool runner",
+                "author": {"login": "bang9"},
+                "latestReviews": [
+                    {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z",
+                    }
+                ],
+                "reviewThreads": [
+                    {
+                        "id": "thread-1",
+                        "state": "resolved",
+                        "actor": {"login": "bang9"},
+                        "updatedAt": "2026-05-11T10:00:00Z",
+                    },
+                    {
+                        "id": "thread-2",
+                        "state": "resolved",
+                        "actor": {"login": "bang9"},
+                        "updatedAt": "2026-05-11T10:03:00Z",
+                    },
+                    {
+                        "id": "thread-3",
+                        "state": "reopened",
+                        "actor": {"login": "bang9"},
+                        "updatedAt": "2026-05-11T10:05:00Z",
+                    },
+                ],
+                "updatedAt": "2026-05-11T10:05:00Z",
+            },
+            current_user="irene",
+        )
+
+        resolved_events = [event for event in events if event.event_type == "thread_resolved"]
+        reopened_events = [event for event in events if event.event_type == "thread_reopened"]
+
+        self.assertEqual(1, len(resolved_events))
+        self.assertEqual("2 review threads were resolved on PR #1049.", resolved_events[0].summary)
+        self.assertEqual(["thread-1", "thread-2"], resolved_events[0].payload["thread_ids"])
+        self.assertEqual("thread-2", resolved_events[0].payload["thread_id"])
+        self.assertEqual("thread_resolved:bang9", resolved_events[0].payload["condition_key"])
+        self.assertEqual(1, len(reopened_events))
+        self.assertEqual("A review thread was reopened on PR #1049.", reopened_events[0].summary)
+
+    def test_review_requested_dedupe_is_stable_across_unrelated_pr_updates(self):
+        base = {
+            "owner": "sendbird",
+            "repo": "ai-agent-js",
+            "number": 1049,
+            "url": PR_URL,
+            "title": "Improve the tool runner",
+            "author": {"login": "bang9"},
+            "reviewRequests": [{"login": "irene"}],
+            "updatedAt": "2026-05-11T10:00:00Z",
+        }
+        noisy_update = dict(base)
+        noisy_update["updatedAt"] = "2026-05-11T11:00:00Z"
+
+        first = [event for event in classify_pr(base, current_user="irene") if event.event_type == "review_requested"]
+        second = [
+            event
+            for event in classify_pr(noisy_update, current_user="irene")
+            if event.event_type == "review_requested"
+        ]
+
+        self.assertEqual(1, len(first))
+        self.assertEqual(1, len(second))
+        self.assertEqual(first[0].dedupe_key, second[0].dedupe_key)
+        self.assertEqual("review_requested:irene", first[0].payload["condition_key"])
+
     def test_render_notification_keeps_desktop_text_compact(self):
         from pr_watch.notifications import render_notification
 
@@ -535,6 +662,30 @@ class PrWatchTests(unittest.TestCase):
             first[0].payload,
         )
 
+    def test_requested_changes_dedupe_is_stable_without_review_object(self):
+        base = {
+            "owner": "sendbird",
+            "repo": "ai-agent-js",
+            "number": 1049,
+            "url": PR_URL,
+            "author": {"login": "irene"},
+            "reviewDecision": "CHANGES_REQUESTED",
+            "updatedAt": "2026-05-15T03:03:00Z",
+        }
+        noisy_update = {**base, "updatedAt": "2026-05-15T04:22:00Z"}
+
+        first = [event for event in classify_pr(base, current_user="irene") if event.event_type == "requested_changes"]
+        second = [
+            event
+            for event in classify_pr(noisy_update, current_user="irene")
+            if event.event_type == "requested_changes"
+        ]
+
+        self.assertEqual(1, len(first))
+        self.assertEqual(1, len(second))
+        self.assertEqual(first[0].dedupe_key, second[0].dedupe_key)
+        self.assertEqual("requested_changes:CHANGES_REQUESTED:reviewer", first[0].payload["condition_key"])
+
     def test_legacy_ci_failed_event_is_reused_after_condition_dedupe_upgrade(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
@@ -629,6 +780,51 @@ class PrWatchTests(unittest.TestCase):
             [event.dedupe_key for event in first],
             [event.dedupe_key for event in second],
         )
+
+    def test_author_inline_review_comments_are_coalesced_per_actor(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1061,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1061",
+                "title": "Update agent runtime",
+                "author": {"login": "irene"},
+                "reviewComments": [
+                    {
+                        "id": 2313318077,
+                        "author": {"login": "bang9"},
+                        "body": "Can we simplify this branch?",
+                        "path": "src/runtime.ts",
+                        "updatedAt": "2026-05-15T02:42:33Z",
+                    },
+                    {
+                        "id": 2313318078,
+                        "author": {"login": "bang9"},
+                        "body": "This needs a guard.",
+                        "path": "src/runner.ts",
+                        "updatedAt": "2026-05-15T02:43:33Z",
+                    },
+                    {
+                        "id": 2313318079,
+                        "author": {"login": "bang9"},
+                        "body": "Can we add a regression test?",
+                        "path": "tests/runtime.test.ts",
+                        "updatedAt": "2026-05-15T02:44:33Z",
+                    },
+                ],
+                "updatedAt": "2026-05-15T03:08:39Z",
+            },
+            current_user="irene",
+        )
+
+        review_comment_events = [event for event in events if event.event_type == "human_review_comment"]
+
+        self.assertEqual(1, len(review_comment_events))
+        self.assertEqual("bang9 left 3 inline review comments on your PR #1061.", review_comment_events[0].summary)
+        self.assertEqual([2313318077, 2313318078, 2313318079], review_comment_events[0].payload["comment_ids"])
+        self.assertEqual(2313318079, review_comment_events[0].payload["comment_id"])
+        self.assertEqual("human_review_comment:bang9", review_comment_events[0].payload["condition_key"])
 
     def test_author_service_inline_review_comments_are_muted(self):
         events = classify_pr(
@@ -725,6 +921,43 @@ class PrWatchTests(unittest.TestCase):
 
         self.assertEqual(["bang9"], [event.actor for event in comment_events])
 
+    def test_author_pr_comments_are_coalesced_per_actor(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1058,
+                "url": "https://github.com/sendbird/ai-agent-js/pull/1058",
+                "author": {"login": "irene"},
+                "comments": [
+                    {
+                        "id": "first-comment",
+                        "author": {"login": "bang9"},
+                        "body": "Can you look at the failing test?",
+                        "authorAssociation": "MEMBER",
+                        "updatedAt": "2026-05-14T01:46:15Z",
+                    },
+                    {
+                        "id": "second-comment",
+                        "author": {"login": "bang9"},
+                        "body": "Also check the fixture.",
+                        "authorAssociation": "MEMBER",
+                        "updatedAt": "2026-05-14T01:47:15Z",
+                    },
+                ],
+                "updatedAt": "2026-05-14T01:47:15Z",
+            },
+            current_user="irene",
+        )
+
+        comment_events = [event for event in events if event.event_type == "human_comment"]
+
+        self.assertEqual(1, len(comment_events))
+        self.assertEqual("bang9 left 2 comments on your PR #1058.", comment_events[0].summary)
+        self.assertEqual(["first-comment", "second-comment"], comment_events[0].payload["comment_ids"])
+        self.assertEqual("second-comment", comment_events[0].payload["comment_id"])
+        self.assertEqual("human_comment:bang9", comment_events[0].payload["condition_key"])
+
     def test_blocked_merge_state_with_mergeable_pr_is_not_a_merge_conflict(self):
         events = classify_pr(
             {
@@ -818,6 +1051,101 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual("bang9", linked_events[0].actor)
         self.assertIn("issue #321", linked_events[0].summary)
         self.assertEqual("github_issue", linked_events[0].payload["source"])
+
+    def test_linked_issue_comments_are_coalesced_per_issue_actor(self):
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "url": PR_URL,
+                "author": {"login": "bang9"},
+                "latestReviews": [
+                    {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z",
+                    }
+                ],
+                "linkedIssues": [
+                    {
+                        "number": 321,
+                        "url": "https://github.com/sendbird/ai-agent-js/issues/321",
+                        "title": "Track review follow-up",
+                        "comments": [
+                            {
+                                "id": 77,
+                                "author": {"login": "bang9"},
+                                "body": "Can we also handle Jira links?",
+                                "updatedAt": "2026-05-11T11:00:00Z",
+                            },
+                            {
+                                "id": 78,
+                                "author": {"login": "bang9"},
+                                "body": "And can we wire the Slack link?",
+                                "updatedAt": "2026-05-11T11:05:00Z",
+                            },
+                            {
+                                "id": 79,
+                                "author": {"login": "bang9"},
+                                "body": "One more follow-up.",
+                                "updatedAt": "2026-05-11T11:10:00Z",
+                            },
+                        ],
+                    }
+                ],
+                "updatedAt": "2026-05-11T11:10:00Z",
+            },
+            current_user="irene",
+        )
+
+        linked_events = [event for event in events if event.event_type == "linked_issue_comment"]
+
+        self.assertEqual(1, len(linked_events))
+        self.assertEqual("bang9 left 3 comments on linked issue #321 for PR #1049.", linked_events[0].summary)
+        self.assertEqual([77, 78, 79], linked_events[0].payload["comment_ids"])
+        self.assertEqual(79, linked_events[0].payload["comment_id"])
+        self.assertEqual("linked_issue_comment:321:bang9", linked_events[0].payload["condition_key"])
+
+    def test_duplicate_linked_issue_sources_emit_one_comment_event(self):
+        linked_issue = {
+            "number": 321,
+            "url": "https://github.com/sendbird/ai-agent-js/issues/321",
+            "title": "Track review follow-up",
+            "comments": [
+                {
+                    "id": 77,
+                    "author": {"login": "bang9"},
+                    "body": "Can we also handle Jira links?",
+                    "updatedAt": "2026-05-11T11:00:00Z",
+                }
+            ],
+        }
+        events = classify_pr(
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1049,
+                "url": PR_URL,
+                "author": {"login": "bang9"},
+                "latestReviews": [
+                    {
+                        "author": {"login": "irene"},
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-11T09:00:00Z",
+                    }
+                ],
+                "linkedIssues": [linked_issue],
+                "closingIssuesReferences": [linked_issue],
+                "updatedAt": "2026-05-11T11:00:00Z",
+            },
+            current_user="irene",
+        )
+
+        linked_events = [event for event in events if event.event_type == "linked_issue_comment"]
+
+        self.assertEqual(1, len(linked_events))
+        self.assertEqual([77], linked_events[0].payload["comment_ids"])
 
     def test_own_linked_issue_comments_are_muted(self):
         events = classify_pr(
@@ -1070,6 +1398,52 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("high", stored.confidence)
             self.assertEqual([], store.list_queue())
 
+    def test_confirm_binding_for_event_promotes_sibling_confirmation_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import confirm_binding_for_event
+
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["session text contains exact PR URL"],
+            )
+            first = store.upsert_event(
+                make_review_event("review-requested"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["first inferred binding requires approval"],
+            )
+            second = store.upsert_event(
+                make_review_event("linked-issue-comment"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["first inferred binding requires approval"],
+            )
+
+            result = confirm_binding_for_event(store, first.event_id, mirror_now=False)
+
+            stored_first = store.get_event(first.event_id)
+            stored_second = store.get_event(second.event_id)
+            self.assertEqual("confirmed_binding", result["action"])
+            self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
+            self.assertEqual("pending", stored_first.status)
+            self.assertEqual("awaiting_approval", stored_first.delivery_status)
+            self.assertEqual("pending", stored_second.status)
+            self.assertEqual("awaiting_approval", stored_second.delivery_status)
+            self.assertEqual(candidate.binding_id, stored_second.binding_id)
+
     def test_confirm_binding_and_mark_handled_confirms_then_dismisses_event(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from pr_watch.mcp_server import confirm_binding_and_mark_handled
@@ -1118,6 +1492,52 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("user_marked_handled", stored.delivery_status)
             self.assertIn("user confirmed binding and marked event handled", stored.evidence)
             self.assertEqual([], store.list_queue())
+
+    def test_confirm_binding_and_mark_handled_promotes_sibling_confirmation_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import confirm_binding_and_mark_handled
+
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-candidate",
+                confirmed=False,
+                confirmation_source="inferred_candidate",
+                evidence=["session text contains exact PR URL"],
+            )
+            first = store.upsert_event(
+                make_review_event("already-handled"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["first inferred binding requires approval"],
+            )
+            second = store.upsert_event(
+                make_review_event("still-actionable"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=candidate.binding_id,
+                confidence="high",
+                evidence=["first inferred binding requires approval"],
+            )
+
+            result = confirm_binding_and_mark_handled(store, first.event_id)
+
+            stored_first = store.get_event(first.event_id)
+            stored_second = store.get_event(second.event_id)
+            self.assertEqual("confirmed_and_marked_handled", result["action"])
+            self.assertTrue(store.get_binding(candidate.binding_id).confirmed)
+            self.assertEqual("dismissed", stored_first.status)
+            self.assertEqual("user_marked_handled", stored_first.delivery_status)
+            self.assertEqual("pending", stored_second.status)
+            self.assertEqual("awaiting_approval", stored_second.delivery_status)
+            self.assertEqual(candidate.binding_id, stored_second.binding_id)
 
     def test_cli_confirm_binding_can_select_candidate_without_triggering_delivery(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1864,6 +2284,46 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual([], runner.commands)
             self.assertEqual(1, len(store.list_queue()))
             self.assertEqual("queued", store.get_event(inbox_item.event_id).status)
+
+    def test_approving_already_queued_event_does_not_duplicate_queue_item(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+            )
+            event = classify_pr(
+                {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": PR_URL,
+                    "author": {"login": "bang9"},
+                    "latestReviews": [
+                        {
+                            "author": {"login": "irene"},
+                            "state": "COMMENTED",
+                            "submittedAt": "2026-05-11T09:00:00Z",
+                        }
+                    ],
+                    "lastPushedAt": "2026-05-11T10:00:00Z",
+                    "updatedAt": "2026-05-11T10:00:00Z",
+                },
+                current_user="irene",
+            )[0]
+            inbox_item = route_event(store, event, sessions=[])
+
+            first = approve_event(store, inbox_item.event_id, session_state="unknown", runner=RecordingRunner())
+            second = approve_event(store, inbox_item.event_id, session_state="unknown", runner=RecordingRunner())
+
+            self.assertEqual("queued", first.action)
+            self.assertEqual("already_queued", second.action)
+            self.assertEqual(1, len(store.list_queue()))
 
     def test_poll_once_fans_out_notifications_without_approving_delivery(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -70,14 +70,15 @@ def _author_events(
     )
     if review_decision == "CHANGES_REQUESTED" or requested_change_review:
         actor = _login((requested_change_review or {}).get("author")) or "reviewer"
+        condition_key = f"requested_changes:{review_decision or 'CHANGES_REQUESTED'}:{actor}"
         yield _event(
             pr,
             role="author",
             event_type="requested_changes",
             actor=actor,
-            occurred_at=str((requested_change_review or {}).get("submittedAt") or updated_at),
+            occurred_at=str((requested_change_review or {}).get("submittedAt") or condition_key),
             summary=f"Requested changes on your PR #{pr.number}.",
-            payload={"reviewDecision": review_decision},
+            payload={"reviewDecision": review_decision, "condition_key": condition_key},
         )
 
     failed_checks = sorted(
@@ -129,37 +130,91 @@ def _author_events(
             },
         )
 
+    comments_by_actor: Dict[str, List[Dict[str, Any]]] = {}
     for comment in _items(pr_data.get("comments")):
         actor = _login(comment.get("author"))
         if _is_actionable_human_comment(comment, current_user):
-            yield _event(
-                pr,
-                role="author",
-                event_type="human_comment",
-                actor=actor,
-                occurred_at=str(comment.get("updatedAt") or comment.get("createdAt") or updated_at),
-                summary=f"{actor} commented on your PR #{pr.number}.",
-                payload={"comment_id": comment.get("id")},
-            )
+            comments_by_actor.setdefault(actor, []).append(comment)
 
+    for actor in sorted(comments_by_actor):
+        comments = sorted(
+            comments_by_actor[actor],
+            key=lambda comment: (
+                str(comment.get("updatedAt") or comment.get("createdAt") or updated_at),
+                str(comment.get("id") or comment.get("databaseId") or comment.get("url") or ""),
+            ),
+        )
+        latest = comments[-1]
+        comment_ids = [
+            comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
+            for comment in comments
+        ]
+        comment_id = comment_ids[-1] if comment_ids else ""
+        occurred_at = str(latest.get("updatedAt") or latest.get("createdAt") or updated_at)
+        count = len(comments)
+        if count == 1:
+            summary = f"{actor} commented on your PR #{pr.number}."
+        else:
+            summary = f"{actor} left {count} comments on your PR #{pr.number}."
+        yield _event(
+            pr,
+            role="author",
+            event_type="human_comment",
+            actor=actor,
+            occurred_at=f"{occurred_at}:{comment_id}",
+            summary=summary,
+            payload={
+                "comment_id": comment_id,
+                "comment_ids": comment_ids,
+                "comment_count": count,
+                "condition_key": f"human_comment:{actor}",
+            },
+        )
+
+    review_comments_by_actor: Dict[str, List[Dict[str, Any]]] = {}
     for comment in _items(pr_data.get("reviewComments") or pr_data.get("review_comments")):
         actor = _login(comment.get("author"))
         if _is_actionable_human_comment(comment, current_user):
-            comment_id = comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
-            occurred_at = str(comment.get("updatedAt") or comment.get("createdAt") or updated_at)
-            yield _event(
-                pr,
-                role="author",
-                event_type="human_review_comment",
-                actor=actor,
-                occurred_at=f"{occurred_at}:{comment_id}",
-                summary=f"{actor} left an inline review comment on your PR #{pr.number}.",
-                payload={
-                    "comment_id": comment_id,
-                    "path": comment.get("path") or "",
-                    "url": comment.get("url") or "",
-                },
-            )
+            review_comments_by_actor.setdefault(actor, []).append(comment)
+
+    for actor in sorted(review_comments_by_actor):
+        comments = sorted(
+            review_comments_by_actor[actor],
+            key=lambda comment: (
+                str(comment.get("updatedAt") or comment.get("createdAt") or updated_at),
+                str(comment.get("id") or comment.get("databaseId") or comment.get("url") or ""),
+            ),
+        )
+        latest = comments[-1]
+        comment_ids = [
+            comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
+            for comment in comments
+        ]
+        comment_id = comment_ids[-1] if comment_ids else ""
+        occurred_at = str(latest.get("updatedAt") or latest.get("createdAt") or updated_at)
+        count = len(comments)
+        if count == 1:
+            summary = f"{actor} left an inline review comment on your PR #{pr.number}."
+        else:
+            summary = f"{actor} left {count} inline review comments on your PR #{pr.number}."
+        yield _event(
+            pr,
+            role="author",
+            event_type="human_review_comment",
+            actor=actor,
+            occurred_at=f"{occurred_at}:{comment_id}",
+            summary=summary,
+            payload={
+                "comment_id": comment_id,
+                "path": latest.get("path") or "",
+                "url": latest.get("url") or "",
+                "comment_ids": comment_ids,
+                "paths": [comment.get("path") or "" for comment in comments],
+                "urls": [comment.get("url") or "" for comment in comments],
+                "comment_count": count,
+                "condition_key": f"human_review_comment:{actor}",
+            },
+        )
 
 
 def _reviewer_events(
@@ -180,42 +235,98 @@ def _reviewer_events(
             payload={"lastPushedAt": last_pushed_at},
         )
 
+    replies_by_actor: Dict[str, List[Dict[str, Any]]] = {}
     for reply in _items(pr_data.get("authorReplies") or pr_data.get("replies")):
         actor = _login(reply.get("author")) or author
         if actor and actor != current_user:
-            yield _event(
-                pr,
-                role="reviewer",
-                event_type="author_reply",
-                actor=actor,
-                occurred_at=str(reply.get("updatedAt") or reply.get("createdAt") or updated_at),
-                summary=f"{actor} replied on PR #{pr.number}.",
-                payload={"reply_id": reply.get("id")},
-            )
+            replies_by_actor.setdefault(actor, []).append(reply)
 
+    for actor in sorted(replies_by_actor):
+        replies = sorted(
+            replies_by_actor[actor],
+            key=lambda reply: (
+                str(reply.get("updatedAt") or reply.get("createdAt") or updated_at),
+                str(reply.get("id") or reply.get("databaseId") or reply.get("url") or ""),
+            ),
+        )
+        latest = replies[-1]
+        reply_ids = [reply.get("id") or reply.get("databaseId") or reply.get("url") or "" for reply in replies]
+        reply_id = reply_ids[-1] if reply_ids else ""
+        occurred_at = str(latest.get("updatedAt") or latest.get("createdAt") or updated_at)
+        count = len(replies)
+        if count == 1:
+            summary = f"{actor} replied on PR #{pr.number}."
+        else:
+            summary = f"{actor} replied {count} times on PR #{pr.number}."
+        yield _event(
+            pr,
+            role="reviewer",
+            event_type="author_reply",
+            actor=actor,
+            occurred_at=f"{occurred_at}:{reply_id}",
+            summary=summary,
+            payload={
+                "reply_id": reply_id,
+                "reply_ids": reply_ids,
+                "reply_count": count,
+                "condition_key": f"author_reply:{actor}",
+            },
+        )
+
+    threads_by_state_actor: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
     for thread in _items(pr_data.get("reviewThreads") or pr_data.get("threads")):
         state = str(thread.get("state") or "").lower()
         if state in {"resolved", "reopened"}:
-            yield _event(
-                pr,
-                role="reviewer",
-                event_type=f"thread_{state}",
-                actor=_login(thread.get("actor")) or author or "github",
-                occurred_at=str(thread.get("updatedAt") or updated_at),
-                summary=f"A review thread was {state} on PR #{pr.number}.",
-                payload={"thread_id": thread.get("id")},
-            )
+            actor = _login(thread.get("actor")) or author or "github"
+            threads_by_state_actor.setdefault((state, actor), []).append(thread)
+
+    for state, actor in sorted(threads_by_state_actor):
+        threads = sorted(
+            threads_by_state_actor[(state, actor)],
+            key=lambda thread: (
+                str(thread.get("updatedAt") or updated_at),
+                str(thread.get("id") or thread.get("databaseId") or thread.get("url") or ""),
+            ),
+        )
+        latest = threads[-1]
+        thread_ids = [
+            thread.get("id") or thread.get("databaseId") or thread.get("url") or ""
+            for thread in threads
+        ]
+        thread_id = thread_ids[-1] if thread_ids else ""
+        occurred_at = str(latest.get("updatedAt") or updated_at)
+        count = len(threads)
+        if count == 1:
+            summary = f"A review thread was {state} on PR #{pr.number}."
+        else:
+            summary = f"{count} review threads were {state} on PR #{pr.number}."
+        yield _event(
+            pr,
+            role="reviewer",
+            event_type=f"thread_{state}",
+            actor=actor,
+            occurred_at=f"{occurred_at}:{thread_id}",
+            summary=summary,
+            payload={
+                "thread_id": thread_id,
+                "thread_ids": thread_ids,
+                "thread_count": count,
+                "condition_key": f"thread_{state}:{actor}",
+            },
+        )
 
     requested = [_login(item) for item in _items(pr_data.get("reviewRequests") or pr_data.get("requestedReviewers"))]
     if current_user in requested:
+        requested_key = ",".join(sorted({login for login in requested if login}))
+        condition_key = f"review_requested:{requested_key}"
         yield _event(
             pr,
             role="requested_reviewer",
             event_type="review_requested",
             actor=author or "author",
-            occurred_at=updated_at,
+            occurred_at=condition_key,
             summary=f"You were requested to review PR #{pr.number}.",
-            payload={"requested_reviewers": requested},
+            payload={"requested_reviewers": requested, "condition_key": condition_key},
         )
 
 
@@ -226,19 +337,44 @@ def _linked_issue_events(
         issue_number = issue.get("number")
         issue_url = str(issue.get("url") or "")
         issue_title = str(issue.get("title") or "")
+        comments_by_actor: Dict[str, List[Dict[str, Any]]] = {}
         for comment in _items(issue.get("comments")):
             actor = _login(comment.get("author"))
             if not _is_actionable_human_comment(comment, current_user):
                 continue
-            comment_id = comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
-            occurred_at = str(comment.get("updatedAt") or comment.get("createdAt") or updated_at)
-            summary = f"{actor} commented on linked issue #{issue_number} for PR #{pr.number}."
+            comments_by_actor.setdefault(actor, []).append(comment)
+
+        for actor in sorted(comments_by_actor):
+            comments = sorted(
+                comments_by_actor[actor],
+                key=lambda comment: (
+                    str(comment.get("updatedAt") or comment.get("createdAt") or updated_at),
+                    str(comment.get("id") or comment.get("databaseId") or comment.get("url") or ""),
+                ),
+            )
+            latest = comments[-1]
+            comment_ids = [
+                comment.get("id") or comment.get("databaseId") or comment.get("url") or ""
+                for comment in comments
+            ]
+            comment_id = comment_ids[-1] if comment_ids else ""
+            occurred_at = str(latest.get("updatedAt") or latest.get("createdAt") or updated_at)
+            condition_key = f"linked_issue_comment:{issue_number}:{actor}"
+            count = len(comments)
+            if count == 1:
+                summary = f"{actor} commented on linked issue #{issue_number} for PR #{pr.number}."
+            else:
+                summary = f"{actor} left {count} comments on linked issue #{issue_number} for PR #{pr.number}."
             payload = {
                 "source": "github_issue",
                 "issue_number": issue_number,
                 "issue_url": issue_url,
                 "issue_title": issue_title,
                 "comment_id": comment_id,
+                "comment_ids": comment_ids,
+                "comment_count": count,
+                "latest_comment_url": latest.get("url") or "",
+                "condition_key": condition_key,
             }
             yield _event(
                 pr,
@@ -273,10 +409,51 @@ def _current_user_role(pr_data: Dict[str, Any], current_user: str, author: str) 
 
 
 def _linked_issues(pr_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    linked = []
+    linked_by_key: Dict[str, Dict[str, Any]] = {}
     for key in ("linkedIssues", "closingIssuesReferences"):
-        linked.extend(_items(pr_data.get(key)))
-    return linked
+        for issue in _items(pr_data.get(key)):
+            issue_key = str(issue.get("number") or issue.get("url") or issue.get("id") or "")
+            if not issue_key:
+                issue_key = f"index:{len(linked_by_key)}"
+            existing = linked_by_key.get(issue_key)
+            if existing is None:
+                linked_by_key[issue_key] = dict(issue)
+                continue
+            for field in ("number", "url", "title"):
+                if not existing.get(field) and issue.get(field):
+                    existing[field] = issue[field]
+            comments = _merge_comments(_items(existing.get("comments")) + _items(issue.get("comments")))
+            if comments:
+                existing["comments"] = comments
+    return list(linked_by_key.values())
+
+
+def _merge_comments(comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for comment in comments:
+        key = _comment_identity(comment)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(comment)
+    return merged
+
+
+def _comment_identity(comment: Dict[str, Any]) -> str:
+    return str(
+        comment.get("id")
+        or comment.get("databaseId")
+        or comment.get("url")
+        or "|".join(
+            [
+                _login(comment.get("author")),
+                str(comment.get("createdAt") or ""),
+                str(comment.get("updatedAt") or ""),
+                str(comment.get("body") or ""),
+            ]
+        )
+    )
 
 
 def _event(

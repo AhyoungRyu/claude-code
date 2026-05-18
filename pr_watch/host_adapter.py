@@ -10,13 +10,20 @@ from .conductor_adapter import (
     mirror_confirmation_to_conductor,
     mirror_event_to_conductor,
 )
-from .delivery import DEFAULT_BUSY_POLICY, approve_event, confirmation_prompt_event, notify_prompt_event
+from .delivery import (
+    CONFIRMATION_PROMPT_HOST,
+    DEFAULT_BUSY_POLICY,
+    approve_event,
+    confirmation_prompt_event,
+    notify_prompt_event,
+)
 from .host_integration import CONDUCTOR_CODEX_BINARY
 from .models import Binding, InboxItem
 from .state import StateStore
 
 
 SUPPORTED_HOSTS = {"conductor", "codex-app", "all"}
+CONDUCTOR_CONFIRMATION_HOST = "conductor_confirmation"
 
 
 @dataclass(frozen=True)
@@ -161,13 +168,17 @@ def _sync_conductor(
             assert binding is not None
             existing_confirmation = store.get_host_sync(
                 event.event_id,
-                "conductor_confirmation",
+                CONDUCTOR_CONFIRMATION_HOST,
+                binding.session_id,
+            ) or store.find_host_sync_for_binding(
+                binding.binding_id,
+                CONDUCTOR_CONFIRMATION_HOST,
                 binding.session_id,
             )
             if existing_confirmation is not None:
                 store.upsert_host_sync(
                     event.event_id,
-                    "conductor_confirmation",
+                    CONDUCTOR_CONFIRMATION_HOST,
                     binding.session_id,
                     "confirmation_already_requested",
                     external_id=existing_confirmation.external_id,
@@ -188,7 +199,7 @@ def _sync_conductor(
                 if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
                     store.upsert_host_sync(
                         event.event_id,
-                        "conductor_confirmation",
+                        CONDUCTOR_CONFIRMATION_HOST,
                         binding.session_id,
                         mirrored.action,
                         external_id=mirrored.message_id,
@@ -200,6 +211,39 @@ def _sync_conductor(
                         action=mirrored.action,
                         target_id=mirrored.session_id or binding.session_id,
                         message=mirrored.message,
+                    )
+                )
+                continue
+
+            existing_prompt = store.get_host_sync(
+                event.event_id,
+                CONFIRMATION_PROMPT_HOST,
+                binding.session_id,
+            )
+            if existing_prompt is not None and existing_prompt.status == "failed":
+                existing_prompt = None
+            if existing_prompt is None:
+                existing_prompt = store.find_host_sync_for_binding(
+                    binding.binding_id,
+                    CONFIRMATION_PROMPT_HOST,
+                    binding.session_id,
+                )
+            if existing_prompt is not None:
+                store.upsert_host_sync(
+                    event.event_id,
+                    CONFIRMATION_PROMPT_HOST,
+                    binding.session_id,
+                    existing_prompt.status,
+                    external_id=existing_prompt.external_id,
+                    error=existing_prompt.error,
+                )
+                results.append(
+                    HostEventResult(
+                        host="conductor",
+                        event_id=event.event_id,
+                        action=_confirmation_prompt_dedupe_action(existing_prompt.status),
+                        target_id=binding.session_id,
+                        message="binding confirmation prompt already recorded; leaving event pending in inbox",
                     )
                 )
                 continue
@@ -350,3 +394,11 @@ def _notify_prompt_codex_binary(binding: Optional[Binding], selected_hosts: set[
     if selected_hosts == {"conductor"} or binding.host == "conductor":
         return _conductor_codex_binary()
     return None
+
+
+def _confirmation_prompt_dedupe_action(status: str) -> str:
+    if status == "sent":
+        return "confirmation_prompt_already_sent"
+    if status == "queued":
+        return "confirmation_prompt_already_queued"
+    return "confirmation_prompt_already_attempted"

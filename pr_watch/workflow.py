@@ -12,6 +12,10 @@ from .util import parse_pr_url, stable_id
 
 
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+CONFIRMATION_DELIVERY_STATUSES = {
+    "awaiting_first_binding_confirmation",
+    "awaiting_rebind_confirmation",
+}
 
 
 @dataclass(frozen=True)
@@ -90,7 +94,8 @@ def confirm_binding_for_event(
     binding = binding_for_confirmation(store, event, session_id=session_id)
     source = "user_confirmed_rebind" if event.delivery_status == "awaiting_rebind_confirmation" else "user_confirmed"
     confirmed = store.confirm_binding(binding.binding_id, source=source)
-    updated = store.update_event(
+    promoted = promote_confirmation_events_for_binding(store, confirmed)
+    updated = promoted.get(event.event_id) or store.update_event(
         event.event_id,
         status="pending",
         delivery_status="awaiting_approval",
@@ -134,6 +139,26 @@ def confirm_binding_for_event(
     }
 
 
+def promote_confirmation_events_for_binding(store: StateStore, confirmed: Binding) -> Dict[str, InboxItem]:
+    promoted: Dict[str, InboxItem] = {}
+    for item in store.list_events(include_done=False):
+        if item.binding_id != confirmed.binding_id:
+            continue
+        if item.status != "needs_confirmation" or item.delivery_status not in CONFIRMATION_DELIVERY_STATUSES:
+            continue
+        promoted[item.event_id] = store.update_event(
+            item.event_id,
+            status="pending",
+            delivery_status="awaiting_approval",
+            binding_id=confirmed.binding_id,
+            confidence="high",
+            evidence=item.evidence + [f"user confirmed active binding {confirmed.agent}:{confirmed.session_id}"],
+            recovery_command="",
+            error="",
+        )
+    return promoted
+
+
 def confirm_binding_and_mark_handled(
     store: StateStore,
     event_id: str,
@@ -147,6 +172,7 @@ def confirm_binding_and_mark_handled(
         else "user_confirmed_handled"
     )
     confirmed = store.confirm_binding(binding.binding_id, source=source)
+    promote_confirmation_events_for_binding(store, confirmed)
     updated = store.update_event(
         event.event_id,
         status="dismissed",

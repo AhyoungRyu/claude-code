@@ -772,6 +772,32 @@ class StateStore:
             ).fetchone()
         return _host_sync_from_row(row) if row else None
 
+    def find_host_sync_for_binding(
+        self,
+        binding_id: str,
+        host: str,
+        target_id: str,
+        ignored_statuses: Iterable[str] = ("failed",),
+    ) -> Optional[HostSyncItem]:
+        ignored = sorted({status for status in ignored_statuses if status})
+        query = """
+            select h.*
+            from host_syncs h
+            join events e on e.event_id = h.event_id
+            where e.binding_id = ?
+              and h.host = ?
+              and h.target_id = ?
+        """
+        params: List[Any] = [binding_id, host, target_id]
+        if ignored:
+            placeholders = ", ".join("?" for _ in ignored)
+            query += f" and h.status not in ({placeholders})"
+            params.extend(ignored)
+        query += " order by h.updated_at desc limit 1"
+        with self.connect() as conn:
+            row = conn.execute(query, tuple(params)).fetchone()
+        return _host_sync_from_row(row) if row else None
+
     def upsert_host_sync(
         self,
         event_id: str,

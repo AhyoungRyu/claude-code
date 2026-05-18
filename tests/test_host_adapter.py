@@ -511,6 +511,57 @@ class HostAdapterTests(unittest.TestCase):
             self.assertTrue(any("Suggested replies:" in row[0] for row in rows))
             self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in row[0] for row in rows))
 
+    def test_host_sync_coalesces_confirmation_prompt_per_candidate_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            make_inbox_item(
+                store,
+                dedupe_suffix="review-requested",
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+            make_inbox_item(
+                store,
+                dedupe_suffix="linked-issue-comment",
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            actions = [item.action for item in result.host_results]
+            self.assertEqual(1, actions.count("confirmation_requested"))
+            self.assertEqual(1, actions.count("confirmation_already_requested"))
+            with sqlite3.connect(db_path) as conn:
+                prompts = conn.execute(
+                    """
+                    select count(*) from session_messages
+                    where role = 'user'
+                      and content like '%PR Watch: Is this the right session%'
+                    """
+                ).fetchone()[0]
+                rows = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(1, prompts)
+            self.assertEqual(2, rows)
+
     def test_host_sync_does_not_remirror_confirmation_when_host_sync_exists_without_visible_row(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conductor.sqlite"
@@ -865,6 +916,56 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIsNotNone(
                 store.get_host_sync(event.event_id, "conductor_confirmation_prompt", candidate.session_id)
             )
+
+    def test_host_sync_coalesces_fallback_confirmation_prompt_per_candidate_binding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "missing.sqlite"
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            make_inbox_item(
+                store,
+                dedupe_suffix="first",
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+            make_inbox_item(
+                store,
+                dedupe_suffix="second",
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+            runner = RecordingRunner()
+            conductor_codex = Path(tmpdir) / "conductor-codex"
+            conductor_codex.write_text("#!/bin/sh\n", encoding="utf-8")
+
+            with patch("pr_watch.host_adapter.CONDUCTOR_CODEX_BINARY", conductor_codex, create=True):
+                result = sync_once(
+                    store,
+                    hosts=["conductor"],
+                    conductor_db_path=db_path,
+                    runner=runner,
+                    session_state="idle",
+                )
+
+            actions = [item.action for item in result.host_results]
+            self.assertEqual(1, actions.count("confirmation_prompt_sent"))
+            self.assertEqual(1, actions.count("confirmation_prompt_already_sent"))
+            self.assertEqual(1, len(runner.commands))
 
     def test_host_sync_retries_failed_confirmation_prompt(self):
         with tempfile.TemporaryDirectory() as tmpdir:

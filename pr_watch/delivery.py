@@ -45,6 +45,9 @@ def approve_event(
     busy_policy: str = DEFAULT_BUSY_POLICY,
 ) -> DeliveryResult:
     event = store.get_event(event_id)
+    if event.status == "queued" or event.delivery_status == "queued":
+        return DeliveryResult("already_queued", event_id, message="event is already queued for this session")
+
     binding = store.get_binding(event.binding_id)
     if binding is None:
         updated = store.update_event(
