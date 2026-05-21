@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
-from .config import config_bool, load_config, state_db_path
+from .config import config_bool, config_list, load_config, state_db_path
 from .delivery import approve_event, notify_prompt_event
 from .github import current_user, poll_once as github_poll_once
 from .host_adapter import status as host_bridge_status
@@ -32,6 +32,7 @@ def poll_once(
     state_dir: Optional[str] = None,
     include_drafts: Optional[bool] = None,
     notification_mode: Optional[str] = None,
+    notify_event_types: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     """Poll GitHub once and record actionable PR events."""
     state_dir = _effective_state_dir(state_dir)
@@ -40,6 +41,11 @@ def poll_once(
         include_drafts if include_drafts is not None else config_bool(config, "include_drafts", default=False)
     )
     selected_notification_mode = notification_mode or config.get("notification_mode", "none")
+    selected_notify_event_types = (
+        notify_event_types
+        if notify_event_types is not None
+        else config_list(config, "notify_event_types", default=["*"])
+    )
     store = StateStore(state_db_path(state_dir))
     items = github_poll_once(
         store,
@@ -50,12 +56,14 @@ def poll_once(
         include_drafts=should_include_drafts,
         notification_mode=selected_notification_mode,
         notification_host="mcp",
+        notify_event_types=selected_notify_event_types,
     )
     item_ids = {item.event_id for item in items}
     return {
         "count": len(items),
         "include_drafts": should_include_drafts,
         "notification_mode": selected_notification_mode,
+        "notify_event_types": selected_notify_event_types,
         "resolved_notification_mode": resolve_notification_mode(selected_notification_mode, host="mcp"),
         "events": [_to_json(item) for item in items],
         "notifications": [
@@ -285,6 +293,7 @@ def check_pr_updates(
     state_dir: Optional[str] = None,
     include_drafts: Optional[bool] = None,
     notification_mode: Optional[str] = None,
+    notify_event_types: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     """User-friendly alias for polling PR updates once."""
     return poll_once(
@@ -294,6 +303,7 @@ def check_pr_updates(
         state_dir=state_dir,
         include_drafts=include_drafts,
         notification_mode=notification_mode,
+        notify_event_types=notify_event_types,
     )
 
 
@@ -340,6 +350,7 @@ def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
         "busy_policy": config.get("busy_policy"),
         "include_drafts": config.get("include_drafts"),
         "notification_mode": config.get("notification_mode"),
+        "notify_event_types": config_list(config, "notify_event_types", default=["*"]),
         "executables": {name: shutil.which(name) for name in ["gh", "claude", "codex", "osascript", "terminal-notifier"]},
         "gh_auth": gh_auth,
         "conductor": "optional, not required",

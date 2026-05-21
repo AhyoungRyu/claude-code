@@ -99,6 +99,13 @@ new Conductor/Codex session after installation so the host reloads MCP config.
 `install-mcp` only registers tools; it does not add watched repositories or
 install the background service.
 
+MCP registration is user-level for the selected host. Once registered, the
+`pr-watch` MCP tools are available from Codex App/CLI or Conductor sessions in
+any repository. Actual background polling is still limited by the local watched
+repository allowlist and the selected `--state-dir`. Use the default
+`~/.pr-watch` state for a normal user-level install, or pass a separate
+`--state-dir` when you intentionally want an isolated test/private watcher.
+
 For the background watcher flow, keep MCP registered and run setup from the
 repository you want to watch:
 
@@ -432,15 +439,41 @@ pr-watch config set notification_mode auto
 pr-watch config set busy_policy run_if_idle_queue_if_busy
 pr-watch config set include_drafts false
 pr-watch config set poll_interval_seconds 120
+pr-watch config set notify_event_types 'author_push_after_review,review_requested,human_comment,human_review_comment,linked_issue_comment'
 ```
 
 | Option | Values | Default | Notes |
 |--------|--------|---------|-------|
 | `notification_mode` | `auto`, `none`, `desktop`, `in_app`, `both` | `auto` | Notification only; does not resume or queue sessions |
 | `busy_policy` | `run_if_idle_queue_if_busy`, `always_queue`, `notify_only`, `drop_if_busy`, `ask_when_busy` | `run_if_idle_queue_if_busy` | Used when approving delivery |
+| `default_delivery` | `confirm_first` | `confirm_first` | First inferred bindings require user confirmation before delivery |
 | `include_drafts` | `true`, `false` | `false` | Draft PRs are ignored unless enabled |
 | `poll_interval_seconds` | integer seconds | `120` | Used by `service install --interval` and the long-running daemon |
+| `notify_event_types` | TOML array, comma-separated list, or `["*"]` | `["*"]` | Filters automatic notifications only; events are still recorded in the inbox |
 | `--state-dir` | path | `~/.pr-watch` | Use a separate state/config directory for tests |
+
+`notify_event_types` is intentionally a notification filter, not an event
+classifier filter. If you remove `ci_failed`, CI failure events still appear in
+the inbox and can be inspected later, but desktop/in-app notifications are not
+sent for them during automatic polling. To disable all automatic event
+notifications while still recording events, set `notification_mode = "none"` or
+set `notify_event_types = []`.
+
+Supported event types:
+
+| Event type | Typical role | Meaning |
+|------------|--------------|---------|
+| `author_push_after_review` | Reviewer | The PR author pushed commits after your review |
+| `author_reply` | Reviewer | The PR author replied in review context |
+| `review_requested` | Requested reviewer | You were requested as a reviewer |
+| `thread_resolved` | Reviewer | A review thread was resolved |
+| `thread_reopened` | Reviewer | A review thread was reopened |
+| `requested_changes` | Author | Someone requested changes on your PR |
+| `ci_failed` | Author | One or more checks failed on your PR |
+| `merge_conflict` | Author | Your PR has a merge conflict |
+| `human_comment` | Author | A human left a top-level PR comment |
+| `human_review_comment` | Author | A human left inline PR review comments |
+| `linked_issue_comment` | Author or reviewer | A human commented on an issue linked from the PR |
 
 ### Background Watcher
 

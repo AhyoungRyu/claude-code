@@ -124,11 +124,21 @@ def notify_events(
     notifier: Optional[object] = None,
     force: bool = False,
     host: Optional[str] = None,
+    notify_event_types: Optional[Iterable[str]] = None,
 ) -> List[NotificationResult]:
-    return [
-        notify_event(store, event.event_id, mode=mode, notifier=notifier, force=force, host=host)
-        for event in events
-    ]
+    results: List[NotificationResult] = []
+    for event in events:
+        if not event_type_is_notifiable(event.event_type, notify_event_types):
+            results.append(
+                NotificationResult(
+                    "skipped",
+                    event.event_id,
+                    message=f"event type {event.event_type} filtered by notify_event_types",
+                )
+            )
+            continue
+        results.append(notify_event(store, event.event_id, mode=mode, notifier=notifier, force=force, host=host))
+    return results
 
 
 def notify_event(
@@ -243,6 +253,15 @@ def notify_conductor_session_event(
 
 def _notification_blocks_send(existing: object, force: bool) -> bool:
     return bool(existing and not force and getattr(existing, "status", "") != "failed")
+
+
+def event_type_is_notifiable(event_type: str, notify_event_types: Optional[Iterable[str]]) -> bool:
+    if notify_event_types is None:
+        return True
+    allowed = {str(item).strip() for item in notify_event_types if str(item).strip()}
+    if not allowed:
+        return False
+    return "*" in allowed or event_type in allowed
 
 
 def render_notification(event: InboxItem, binding: Optional[Binding] = None) -> tuple[str, str]:

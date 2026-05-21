@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from .config import config_bool, default_state_dir, load_config, set_config_value, state_db_path
+from .config import config_bool, config_list, default_state_dir, load_config, set_config_value, state_db_path
 from .github import current_user, poll_once
 from .host_adapter import sync_once as host_sync_once
 from .models import SessionInfo
@@ -312,6 +312,7 @@ def _run_service_once_locked(
         include_drafts if include_drafts is not None else config_bool(config, "include_drafts", default=False)
     )
     mode = notification_mode or config.get("notification_mode", "none")
+    notify_event_types = config_list(config, "notify_event_types", default=["*"])
     user = current_user_login or current_user()
     session_list = list(sessions) if sessions is not None else discover_sessions()
     started = time.monotonic()
@@ -332,6 +333,7 @@ def _run_service_once_locked(
                 include_drafts=should_include_drafts,
                 notification_mode=mode,
                 notification_host=notification_host,
+                notify_event_types=notify_event_types,
             )
         except Exception as exc:
             repo_results.append(RepoRunResult(repo, "failed", message=str(exc)))

@@ -233,6 +233,7 @@ def poll_once(
     notification_mode: str = "none",
     notifier: Optional[object] = None,
     notification_host: Optional[str] = None,
+    notify_event_types: Optional[Iterable[str]] = None,
 ) -> List[InboxItem]:
     if fixture:
         prs = load_fixture(fixture)
@@ -262,7 +263,14 @@ def poll_once(
             routed.append(routed_event)
     if reconcile_repo:
         store.dismiss_stale_current_pr_events(reconcile_repo, open_numbers, current_dedupe_keys)
-    notify_events(store, routed, mode=notification_mode, notifier=notifier, host=notification_host)
+    notify_events(
+        store,
+        routed,
+        mode=notification_mode,
+        notifier=notifier,
+        host=notification_host,
+        notify_event_types=notify_event_types,
+    )
     return routed
 
 
@@ -276,6 +284,7 @@ def daemon_loop(
     include_drafts: bool = False,
     notification_mode: str = "none",
     notification_host: Optional[str] = None,
+    notify_event_types: Optional[Iterable[str]] = None,
 ) -> None:
     while True:
         poll_once(
@@ -287,6 +296,7 @@ def daemon_loop(
             include_drafts=include_drafts,
             notification_mode=notification_mode,
             notification_host=notification_host,
+            notify_event_types=notify_event_types,
         )
         time.sleep(interval_seconds)
 

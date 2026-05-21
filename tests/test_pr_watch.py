@@ -186,6 +186,21 @@ class PrWatchTests(unittest.TestCase):
     def test_browser_notification_mode_is_legacy_alias_for_in_app(self):
         self.assertEqual("in_app", resolve_notification_mode("browser", platform_name="Darwin"))
 
+    def test_config_defaults_notify_all_event_types(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual(["*"], load_config(tmpdir).get("notify_event_types"))
+
+    def test_config_loads_notify_event_types_array(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "config.toml").write_text(
+                'notify_event_types = ["ci_failed", "human_comment"]\n',
+                encoding="utf-8",
+            )
+
+            config = load_config(tmpdir)
+
+            self.assertEqual(["ci_failed", "human_comment"], config["notify_event_types"])
+
     def test_reviewer_update_summary_uses_github_login(self):
         events = classify_pr(
             {
@@ -3293,6 +3308,50 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("notify_only", notify_only["action"])
             self.assertEqual("queued", queued["action"])
 
+    def test_mcp_poll_filters_notifications_by_configured_event_types_without_dropping_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.mcp_server import check_pr_updates, show_in_app_notifications
+
+            Path(tmpdir, "config.toml").write_text(
+                '\n'.join(
+                    [
+                        'notification_mode = "in_app"',
+                        'notify_event_types = ["author_push_after_review"]',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fixture = Path(tmpdir) / "ci-failure.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1093,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1093",
+                    "headRefName": "fix/react-e2e-scroll-to-bottom-deterministic",
+                    "isDraft": false,
+                    "author": {"login": "irene"},
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "statusCheckRollup": [
+                      {"name": "run-test", "conclusion": "FAILURE"}
+                    ],
+                    "updatedAt": "2026-05-20T09:40:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+
+            updates = check_pr_updates(fixture=str(fixture), user="irene", state_dir=tmpdir)
+            notifications = show_in_app_notifications(state_dir=tmpdir)
+
+            self.assertEqual(["ci_failed"], [event["event_type"] for event in updates["events"]])
+            self.assertEqual(["author_push_after_review"], updates["notify_event_types"])
+            self.assertEqual([], notifications["notifications"])
+
     def test_cli_init_profiles_set_host_appropriate_notification_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with redirect_stdout(StringIO()):
@@ -3311,6 +3370,27 @@ class PrWatchTests(unittest.TestCase):
                 app_code = main(["--state-dir", tmpdir, "init", "--profile", "app"])
             self.assertEqual(0, app_code)
             self.assertEqual("in_app", load_config(tmpdir)["notification_mode"])
+
+    def test_cli_config_set_writes_notify_event_types_array(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with redirect_stdout(StringIO()):
+                code = main(
+                    [
+                        "--state-dir",
+                        tmpdir,
+                        "config",
+                        "set",
+                        "notify_event_types",
+                        "ci_failed,human_comment",
+                    ]
+                )
+
+            self.assertEqual(0, code)
+            self.assertEqual(["ci_failed", "human_comment"], load_config(tmpdir)["notify_event_types"])
+            self.assertIn(
+                'notify_event_types = ["ci_failed", "human_comment"]',
+                Path(tmpdir, "config.toml").read_text(encoding="utf-8"),
+            )
 
     def test_mcp_launch_config_uses_python_module_entrypoint(self):
         launch = build_mcp_launch_config(

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from .config import config_bool, load_config, set_config_value, state_db_path
+from .config import config_bool, config_list, load_config, set_config_value, state_db_path
 from .delivery import DEFAULT_BUSY_POLICY, approve_event, notify_prompt_event
 from .github import current_user, daemon_loop, poll_once
 from .host_integration import (
@@ -136,6 +136,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else config_bool(config, "include_drafts", default=False)
             )
             notification_mode = args.notification_mode or config.get("notification_mode", "none")
+            notify_event_types = config_list(config, "notify_event_types", default=["*"])
             sessions = discover_sessions()
             if args.once:
                 items = poll_once(
@@ -146,6 +147,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     sessions=sessions,
                     include_drafts=include_drafts,
                     notification_mode=notification_mode,
+                    notify_event_types=notify_event_types,
                 )
                 print(f"recorded {len(items)} actionable event(s)")
                 return 0
@@ -159,6 +161,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 interval_seconds=interval,
                 include_drafts=include_drafts,
                 notification_mode=notification_mode,
+                notify_event_types=notify_event_types,
             )
             return 0
         if args.command == "inbox":
@@ -857,6 +860,7 @@ def doctor(state_dir: Optional[str]) -> int:
     print(f"busy_policy: {config.get('busy_policy')}")
     print(f"include_drafts: {config.get('include_drafts')}")
     print(f"notification_mode: {config.get('notification_mode')}")
+    print(f"notify_event_types: {', '.join(config_list(config, 'notify_event_types', default=['*']))}")
     for executable in ["gh", "claude", "codex", "osascript", "terminal-notifier"]:
         path = shutil.which(executable)
         print(f"{executable}: {path or 'not found'}")
