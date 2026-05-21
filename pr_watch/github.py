@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
 from .classifier import classify_pr
-from .models import InboxItem, SessionInfo
+from .models import InboxItem, PullRequestRef, SessionInfo
 from .notifications import notify_events
 from .state import StateStore
 from .util import normalize_repo_full_name
-from .workflow import route_event
+from .workflow import ensure_silent_author_binding, route_event
 
 
 GH_PR_FIELDS = (
@@ -252,6 +252,8 @@ def poll_once(
     routed: List[InboxItem] = []
     current_dedupe_keys: List[str] = []
     for pr in prs:
+        if _pr_author_login(pr) == current_user_login:
+            ensure_silent_author_binding(store, _pull_request_ref(pr), session_list)
         if pr.get("isDraft") and not include_drafts:
             continue
         for event in classify_pr(pr, current_user_login):
@@ -298,3 +300,25 @@ def _infer_repo_from_prs(prs: Iterable[dict]) -> Optional[str]:
     if len(repos) == 1:
         return next(iter(repos))
     return None
+
+
+def _pull_request_ref(pr: dict) -> PullRequestRef:
+    owner, repo = _pr_repo_full_name(pr)
+    number = int(pr.get("number"))
+    return PullRequestRef(
+        owner=owner,
+        repo=repo,
+        number=number,
+        url=str(pr.get("url") or pr.get("html_url") or f"https://github.com/{owner}/{repo}/pull/{number}"),
+        title=str(pr.get("title") or ""),
+        head_ref=str(pr.get("headRefName") or pr.get("head_ref") or ""),
+    )
+
+
+def _pr_author_login(pr: dict) -> str:
+    author = pr.get("author")
+    if isinstance(author, dict):
+        return str(author.get("login") or author.get("name") or "")
+    if isinstance(author, str):
+        return author
+    return ""

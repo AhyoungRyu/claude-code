@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .models import Binding, InboxItem
-from .util import utc_now
+from .util import format_local_time, summarize_pr_event, utc_now
 
 
 DEFAULT_CONDUCTOR_DB_PATH = (
@@ -111,6 +111,111 @@ def mirror_confirmation_to_conductor(
     )
 
 
+def visible_conductor_message_exists(
+    path: Optional[str | Path],
+    binding_session_id: str,
+    message_or_turn_id: str,
+) -> bool:
+    if not message_or_turn_id:
+        return False
+    status = check_conductor_db(path)
+    if not status.available:
+        return False
+
+    try:
+        with _connect_readonly(status.db_path) as conn:
+            session = _find_session(conn, binding_session_id)
+            if session is None:
+                return False
+            row = conn.execute(
+                """
+                select m.id
+                from session_messages m
+                left join session_messages u
+                  on u.session_id = m.session_id
+                 and u.role = 'user'
+                 and u.id = m.turn_id
+                where m.session_id = ?
+                  and (m.id = ? or m.turn_id = ?)
+                  and (
+                    (m.role = 'user' and m.turn_id = m.id)
+                    or (
+                      m.role = 'assistant'
+                      and m.turn_id is not null
+                      and m.turn_id != ''
+                      and u.id is not null
+                    )
+                  )
+                limit 1
+                """,
+                (str(session["id"]), message_or_turn_id, message_or_turn_id),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def confirmation_activity_after_prompt(
+    path: Optional[str | Path],
+    event: InboxItem,
+    binding: Binding,
+) -> str:
+    status = check_conductor_db(path)
+    if not status.available:
+        return ""
+
+    prompt_text = (
+        f"PR Watch: Is this the right session for PR "
+        f"{event.repo_owner}/{event.repo_name}#{event.pr_number}?"
+    )
+    try:
+        with _connect_readonly(status.db_path) as conn:
+            session = _find_session(conn, binding.session_id)
+            if session is None:
+                return ""
+            session_id = str(session["id"])
+            prompt = conn.execute(
+                """
+                select id, turn_id, created_at
+                from session_messages
+                where session_id = ?
+                  and role = 'user'
+                  and turn_id = id
+                  and content like ?
+                order by created_at desc
+                limit 1
+                """,
+                (session_id, f"%{prompt_text}%"),
+            ).fetchone()
+            if prompt is None:
+                return ""
+            rows = conn.execute(
+                """
+                select id, role, content, created_at, turn_id
+                from session_messages
+                where session_id = ?
+                  and created_at > ?
+                  and coalesce(turn_id, '') != ?
+                order by created_at asc
+                limit 100
+                """,
+                (session_id, str(prompt["created_at"]), str(prompt["turn_id"] or prompt["id"])),
+            ).fetchall()
+    except sqlite3.Error:
+        return ""
+
+    for row in rows:
+        content = str(row["content"] or "")
+        if _is_pr_watch_synthetic_content(content):
+            continue
+        if _content_mentions_pr(content, event):
+            return (
+                f"session activity after confirmation prompt referenced "
+                f"{event.repo_owner}/{event.repo_name}#{event.pr_number} at {row['created_at']}"
+            )
+    return ""
+
+
 def _mirror_message_to_conductor(
     path: Optional[str | Path],
     event: InboxItem,
@@ -158,7 +263,7 @@ def _mirror_message_to_conductor(
                 assistant_text,
                 session_id=binding.session_id,
                 message_id=message_id,
-                marker={"marker": marker} if marker.startswith("pr-watch:confirm_event_id=") else None,
+                marker={"marker": marker},
             )
             _insert_synthetic_message(
                 conn,
@@ -301,24 +406,24 @@ def _render_confirmation_user_prompt(event: InboxItem) -> str:
 
 
 def _render_update_user_prompt(event: InboxItem) -> str:
-    return "\n".join(
+    lines = [
+        f"PR Watch: {event.repo_owner}/{event.repo_name}#{event.pr_number} has an update",
+        "",
+    ]
+    event_time = format_local_time(event.created_at)
+    if event_time:
+        lines.extend([f"Event time: {event_time}", ""])
+    lines.extend(
         [
-            f"PR Watch: PR #{event.pr_number} has an update",
-            "",
-            f"{event.actor}: {event.summary}",
-            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
-            f"Link: {event.pr_url}",
+            summarize_pr_event(event.actor, event.summary, event.repo_owner, event.repo_name, event.pr_number),
             "",
             "Suggested replies:",
             "- Inspect update",
             "- Queue for later",
             "- Ignore this update",
-            "",
-            f"Event id: {event.event_id}",
-            f"pr-watch:event_id={event.event_id}",
-            f"pr-watch:prompt_version={PROMPT_VERSION}",
         ]
     )
+    return "\n".join(lines)
 
 
 def _render_assistant_payload(
@@ -377,6 +482,38 @@ def _suggested_reply(label: str, event_id: str, action: str) -> dict[str, str]:
         "event_id": event_id,
         "action": action,
     }
+
+
+def _is_pr_watch_synthetic_content(content: str) -> bool:
+    lowered = content.lower()
+    synthetic_markers = [
+        "pr watch:",
+        "pr-watch:",
+        '"pr_watch"',
+        "i found a likely pr watch session match",
+        "suggested replies:\n- confirm this session",
+        "choose one:\n- confirm this session",
+        "i will wait for your choice before running tools or reading files",
+    ]
+    return any(marker in lowered for marker in synthetic_markers)
+
+
+def _content_mentions_pr(content: str, event: InboxItem) -> bool:
+    lowered = content.lower()
+    number = str(event.pr_number)
+    markers = [
+        event.pr_url.lower(),
+        f"/pull/{number}",
+        f"pull/{number}",
+        f"/pulls/{number}/comments",
+        f"pulls/{number}/comments",
+        f"#{number}",
+        f"pr #{number}",
+        f"pr {number}",
+        f"number:{number}",
+        f"number: {number}",
+    ]
+    return any(marker in lowered for marker in markers)
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:

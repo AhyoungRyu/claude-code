@@ -9,6 +9,25 @@ It polls GitHub with the user's existing `gh` authentication, stores state under
 `~/.pr-watch/`, tracks PR/session bindings, and queues or resumes Claude Code and
 Codex sessions only after user approval.
 
+### How It Works
+
+`pr-watch` is intentionally local-first. The background watcher, CLI, and MCP
+server all read and write the same SQLite state under `~/.pr-watch/`.
+
+| Step | Component | What happens |
+|------|-----------|--------------|
+| 1 | Background watcher or MCP `check_pr_updates` | Polls watched GitHub repositories through the local `gh` login |
+| 2 | Classifier | Converts PR transitions, human comments, review requests, CI status, and linked issue comments into deduped inbox events |
+| 3 | Session discovery | Scans local Claude/Codex session history for exact PR URLs, repo/PR anchors, branches, cwd, activity, and host hints |
+| 4 | Binding router | Reuses confirmed PR/session bindings, asks for confirmation on first or changed matches, and leaves ambiguous/low-confidence items pending |
+| 5 | Notification layer | Sends desktop, in-app MCP, or Conductor-visible notification prompts without inspecting files or taking GitHub action |
+| 6 | User approval | Only after approval does PR Watch queue or resume a bound Claude/Codex session |
+
+Notification prompts are deliberately separate from delivery. A desktop
+notification or Conductor-visible prompt means "this PR needs attention"; it
+does not mean the agent has inspected the PR, edited code, posted comments, or
+resumed a session.
+
 ### Quick Start
 
 Install from this checkout with Python 3.11+:
@@ -383,7 +402,7 @@ polling:
 
 ```bash
 pr-watch init --profile terminal      # desktop notifications for CLI users
-pr-watch init --profile conductor     # in-app inbox for Conductor hosts
+pr-watch init --profile conductor     # PR Watch desktop notifications for Conductor users
 pr-watch init --profile app           # in-app inbox for app/MCP hosts
 pr-watch daemon --once --repo owner/name --notification-mode desktop
 pr-watch service install --interval 120 --notification-mode in_app
@@ -394,17 +413,17 @@ pr-watch notifications
 
 The default `auto` mode resolves to `in_app` for app-style hosts such as MCP,
 Conductor, or Codex App adapters, and to `desktop` for plain macOS terminal
-usage. The `desktop` channel uses the local macOS notification bridge with a
-compact title such as `ai-agent-js #1049 needs attention` and the event summary
-as the body; the PR URL stays in local state instead of the visible notification
-text. If `terminal-notifier` is installed and the binding has a known host such
-as Conductor, Codex App, Warp, Terminal, or iTerm, PR Watch asks macOS to
-activate that app when the notification is clicked. The built-in `osascript`
-fallback cannot control click behavior, so it only sends the compact
-notification. The `in_app` channel writes a durable local notification inbox
-that MCP, Codex App, or Conductor adapters can consume without approving,
-resuming, or queueing the agent session. The old `browser` value is still
-accepted as a legacy alias for `in_app`.
+usage. The `desktop` channel uses `terminal-notifier` with a generated PR Watch
+icon, a compact title such as `ai-agent-js #1049 needs attention`, and the event
+summary as the body. When the notification is clicked, Conductor-bound events
+open `conductor://open`; other events open the GitHub PR URL. PR Watch does not
+send these clickable notifications through Script Editor or impersonate the
+Conductor/Codex application icon. The built-in `osascript` fallback is kept only
+for non-clickable local notifications because it cannot control click behavior.
+The `in_app` channel writes a durable local notification inbox that MCP, Codex
+App, or Conductor adapters can consume without approving, resuming, or queueing
+the agent session. The old `browser` value is still accepted as a legacy alias
+for `in_app`.
 
 Common configuration:
 
@@ -492,16 +511,19 @@ webhook service. Low-confidence events stay in the inbox, first inferred
 bindings require approval, and unknown session state is treated as busy so
 approved work queues by default.
 
-Confirmed bindings are mutable active-handler pointers. When a new high
-confidence session candidate appears for the same PR and role, `pr-watch` keeps
-the old binding active but marks the event `needs_confirmation` /
+Confirmed bindings are active PR/session handlers. Multiple confirmed sessions
+can stay active for the same PR and role, which supports reviewing or working
+from both Claude Code and Codex sessions. When a new high-confidence session
+candidate appears for the same PR and role, `pr-watch` keeps existing bindings
+active and marks the event `needs_confirmation` /
 `awaiting_rebind_confirmation` for the new candidate. Confirming that candidate
-supersedes the previous binding for future events. Ambiguous or low-confidence
-different candidates stay as manual inbox decisions and are not mirrored to the
-old active session for that event.
+adds it as another active handler. Ambiguous or low-confidence different
+candidates stay as manual inbox decisions and are not mirrored to an existing
+active session for that event.
 
 When several local sessions match the same PR, `pr-watch` prefers
-active/focused host sessions when that signal is available, then stronger PR
+active/focused host sessions when that signal is available, then Conductor
+sessions over CLI/meta sessions at the same confidence, then stronger PR
 evidence, then the newest `last_activity_at`. If multiple medium-or-better
 candidates are still tied, the event stays in the inbox with
 `ambiguous_session_candidates` until the user explicitly chooses one session.

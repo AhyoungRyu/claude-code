@@ -262,13 +262,6 @@ class StateStore:
             created_at=binding.created_at,
             last_event_at=binding.last_event_at,
         )
-        self.deactivate_confirmed_bindings(
-            confirmed.repo_owner,
-            confirmed.repo_name,
-            confirmed.pr_number,
-            confirmed.role,
-            except_binding_id=confirmed.binding_id,
-        )
         return self.upsert_binding(confirmed)
 
     def deactivate_confirmed_bindings(
@@ -301,18 +294,21 @@ class StateStore:
         return _binding_from_row(row) if row else None
 
     def find_confirmed_binding(self, event: ClassifiedEvent) -> Optional[Binding]:
+        bindings = self.list_confirmed_bindings(event)
+        return bindings[0] if bindings else None
+
+    def list_confirmed_bindings(self, event: ClassifiedEvent) -> List[Binding]:
         with self.connect() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 select * from bindings
                 where repo_owner = ? and repo_name = ? and pr_number = ?
                   and role = ? and confirmed = 1 and active = 1
                 order by updated_at desc
-                limit 1
                 """,
                 (event.pr.owner, event.pr.repo, event.pr.number, event.role),
-            ).fetchone()
-        return _binding_from_row(row) if row else None
+            ).fetchall()
+        return [_binding_from_row(row) for row in rows]
 
     def find_binding_for_session(
         self,
@@ -778,8 +774,10 @@ class StateStore:
         host: str,
         target_id: str,
         ignored_statuses: Iterable[str] = ("failed",),
+        active_event_statuses: Optional[Iterable[str]] = ("pending", "needs_confirmation", "queued"),
     ) -> Optional[HostSyncItem]:
         ignored = sorted({status for status in ignored_statuses if status})
+        active_statuses = sorted({status for status in active_event_statuses or [] if status})
         query = """
             select h.*
             from host_syncs h
@@ -793,6 +791,12 @@ class StateStore:
             placeholders = ", ".join("?" for _ in ignored)
             query += f" and h.status not in ({placeholders})"
             params.extend(ignored)
+        if active_event_statuses is not None:
+            if not active_statuses:
+                return None
+            placeholders = ", ".join("?" for _ in active_statuses)
+            query += f" and e.status in ({placeholders})"
+            params.extend(active_statuses)
         query += " order by h.updated_at desc limit 1"
         with self.connect() as conn:
             row = conn.execute(query, tuple(params)).fetchone()

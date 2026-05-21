@@ -42,7 +42,7 @@ from .workflow import (
 
 INIT_PROFILE_NOTIFICATION_MODES = {
     "terminal": "desktop",
-    "conductor": "in_app",
+    "conductor": "desktop",
     "app": "in_app",
     "auto": "auto",
 }

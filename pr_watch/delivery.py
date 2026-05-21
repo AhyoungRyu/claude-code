@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from .models import Binding, DeliveryResult, InboxItem
 from .state import StateStore
-from .util import shell_join
+from .util import format_local_time, shell_join, summarize_pr_event
 
 
 DEFAULT_BUSY_POLICY = "run_if_idle_queue_if_busy"
@@ -240,24 +240,26 @@ def resume_command(binding: Binding, prompt: str, codex_binary: Optional[str] = 
 
 
 def render_notify_prompt(event: InboxItem) -> str:
-    return "\n".join(
+    lines = [
+        f"PR Watch: {event.repo_owner}/{event.repo_name}#{event.pr_number} has an update",
+        "",
+    ]
+    event_time = format_local_time(event.created_at)
+    if event_time:
+        lines.extend([f"Event time: {event_time}", ""])
+    lines.extend(
         [
-            f"PR Watch: PR #{event.pr_number} has an update",
-            "",
-            f"{event.actor}: {event.summary}",
-            f"Repo: {event.repo_owner}/{event.repo_name}#{event.pr_number}",
-            f"Link: {event.pr_url}",
+            summarize_pr_event(event.actor, event.summary, event.repo_owner, event.repo_name, event.pr_number),
             "",
             "Suggested replies:",
             "- Inspect update",
             "- Queue for later",
             "- Ignore this update",
             "",
-            f"Event id: {event.event_id}",
-            "",
             "Do not run tools or read files unless the user chooses Inspect update; wait for the user's choice before inspecting files, calling GitHub, editing, commenting, or pushing.",
         ]
     )
+    return "\n".join(lines)
 
 
 def render_confirmation_prompt(event: InboxItem, binding: Binding) -> str:

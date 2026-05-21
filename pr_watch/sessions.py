@@ -10,6 +10,14 @@ from .util import json_text
 
 
 BRANCH_RE = re.compile(r"(?:branch|on branch)[:= ]+([A-Za-z0-9._/\-]+)", re.IGNORECASE)
+PR_ANCHOR_RE = re.compile(
+    r"(/ ?review-pr\b|https://github\.com/[^/\s]+/[^/\s]+/pull/\d+|\bPR\s*#?\d+\b|"
+    r"pull/\d+#discussion_r|/pulls/\d+/comments|pulls/\d+/comments)",
+    re.IGNORECASE,
+)
+PR_WATCH_SYNTHETIC_RE = re.compile(r"\bPR Watch:", re.IGNORECASE)
+MAX_SESSION_RECORD_TEXT_CHARS = 4_000
+MAX_ANCHOR_SCAN_CHARS = 8_000
 
 
 def discover_sessions(home: Optional[Path] = None) -> List[SessionInfo]:
@@ -29,13 +37,16 @@ def _discover_claude(home: Path) -> List[SessionInfo]:
         records = list(_read_jsonl(path))
         if not records:
             continue
-        text = "\n".join(json_text(record) for record in records[-50:])
+        text = _claude_session_text(records)
         latest = records[-1]
         session_id = _first_value(records, ["sessionId", "session_id", "id"]) or path.stem
         cwd = _first_value(records, ["cwd", "currentWorkingDirectory"]) or ""
         title = _first_value(records, ["title", "summary"]) or _text_preview(text)
         branch = _first_value(records, ["branch", "gitBranch"]) or _extract_branch(text)
-        last_activity = str(latest.get("timestamp") or latest.get("updated_at") or latest.get("created_at") or "")
+        last_activity = _latest_non_synthetic_record_timestamp(records, _claude_record_text) or str(
+            latest.get("timestamp") or latest.get("updated_at") or latest.get("created_at") or ""
+        )
+        host = "conductor" if _looks_like_conductor_session(records, cwd, text) else None
         sessions.append(
             SessionInfo(
                 agent="claude",
@@ -44,11 +55,75 @@ def _discover_claude(home: Path) -> List[SessionInfo]:
                 cwd=cwd,
                 branch=branch,
                 text=text,
-                host=None,
+                host=host,
                 last_activity_at=last_activity,
             )
         )
     return sessions
+
+
+def _claude_session_text(records: List[Dict[str, Any]]) -> str:
+    selected: dict[int, str] = {}
+    for index, record in enumerate(records[:20]):
+        text = _non_synthetic_record_text(record, _claude_record_text)
+        text = _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS) if text else ""
+        if text:
+            selected[index] = text
+    for index, record in enumerate(records):
+        text = _non_synthetic_record_text(record, _claude_record_text)
+        if text and PR_ANCHOR_RE.search(_bounded_text(text, MAX_ANCHOR_SCAN_CHARS)):
+            selected[index] = _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS)
+    start = max(0, len(records) - 80)
+    for offset, record in enumerate(records[start:], start=start):
+        text = _non_synthetic_record_text(record, _claude_record_text)
+        text = _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS) if text else ""
+        if text:
+            selected[offset] = text
+    return "\n".join(selected[index] for index in sorted(selected))
+
+
+def _bounded_record_text(record: Dict[str, Any]) -> str:
+    text = _non_synthetic_record_text(record, json_text)
+    return _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS) if text else ""
+
+
+def _claude_record_text(record: Dict[str, Any]) -> str:
+    record_type = record.get("type")
+    if record_type and record_type not in {"user", "assistant"}:
+        return ""
+    return json_text(record)
+
+
+def _bounded_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return text[:head] + "\n...[pr-watch truncated large session record]...\n" + text[-tail:]
+
+
+def _non_synthetic_record_text(record: Dict[str, Any], extract_text) -> str:
+    text = extract_text(record)
+    return "" if _is_pr_watch_synthetic_text(text) else text
+
+
+def _is_pr_watch_synthetic_text(text: str) -> bool:
+    lowered = text.lower()
+    return bool(PR_WATCH_SYNTHETIC_RE.search(text)) or "pr-watch:" in lowered or '"pr_watch"' in lowered
+
+
+def _looks_like_conductor_session(records: List[Dict[str, Any]], cwd: str, text: str) -> bool:
+    if _looks_like_conductor_context(cwd, text):
+        return True
+    return any(str(record.get("entrypoint") or "") == "sdk-ts" for record in records)
+
+
+def _looks_like_conductor_context(cwd: str, text: str) -> bool:
+    if "/conductor/" in cwd:
+        return True
+    if "inside conductor" in text.lower():
+        return True
+    return False
 
 
 def _discover_codex(home: Path) -> List[SessionInfo]:
@@ -66,16 +141,18 @@ def _discover_codex(home: Path) -> List[SessionInfo]:
             session_id = str(record.get("id") or record.get("session_id") or record.get("sessionId") or "")
             if not session_id:
                 continue
-            text = json_text(record)
+            text = _bounded_record_text(record)
+            cwd = str(record.get("cwd") or record.get("workspace") or "")
+            host = str(record.get("host") or "") or _codex_host(cwd, text)
             sessions.append(
                 SessionInfo(
                     agent="codex",
                     session_id=session_id,
                     title=str(record.get("title") or record.get("name") or _text_preview(text)),
-                    cwd=str(record.get("cwd") or record.get("workspace") or ""),
+                    cwd=cwd,
                     branch=str(record.get("branch") or record.get("git_branch") or _extract_branch(text)),
                     text=text,
-                    host=record.get("host"),
+                    host=host,
                     last_activity_at=str(record.get("updated_at") or record.get("last_activity_at") or ""),
                 )
             )
@@ -95,7 +172,8 @@ def _discover_codex_rollouts(codex_root: Path) -> List[SessionInfo]:
         meta = _codex_session_meta(records)
         session_id = str(meta.get("id") or path.stem)
         cwd = str(meta.get("cwd") or "")
-        text = "\n".join(_codex_record_text(record) for record in records if _codex_record_text(record))
+        text = _codex_rollout_session_text(records)
+        host = _codex_host(cwd, text)
         sessions.append(
             SessionInfo(
                 agent="codex",
@@ -104,11 +182,36 @@ def _discover_codex_rollouts(codex_root: Path) -> List[SessionInfo]:
                 cwd=cwd,
                 branch=_extract_branch(text),
                 text=text,
-                host="codex_cli",
-                last_activity_at=_latest_record_timestamp(records) or str(meta.get("timestamp") or ""),
+                host=host,
+                last_activity_at=_latest_non_synthetic_record_timestamp(records, _codex_record_text)
+                or str(meta.get("timestamp") or ""),
             )
         )
     return sessions
+
+
+def _codex_rollout_session_text(records: List[Dict[str, Any]]) -> str:
+    selected: dict[int, str] = {}
+    for index, record in enumerate(records[:20]):
+        text = _non_synthetic_record_text(record, _codex_record_text)
+        text = _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS) if text else ""
+        if text:
+            selected[index] = text
+    for index, record in enumerate(records):
+        text = _non_synthetic_record_text(record, _codex_record_text)
+        if text and PR_ANCHOR_RE.search(_bounded_text(text, MAX_ANCHOR_SCAN_CHARS)):
+            selected[index] = _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS)
+    start = max(0, len(records) - 80)
+    for offset, record in enumerate(records[start:], start=start):
+        text = _non_synthetic_record_text(record, _codex_record_text)
+        text = _bounded_text(text, MAX_SESSION_RECORD_TEXT_CHARS) if text else ""
+        if text:
+            selected[offset] = text
+    return "\n".join(selected[index] for index in sorted(selected))
+
+
+def _codex_host(cwd: str, text: str) -> str:
+    return "conductor" if _looks_like_conductor_context(cwd, text) else "codex_cli"
 
 
 def _read_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
@@ -162,6 +265,31 @@ def _latest_record_timestamp(records: List[Dict[str, Any]]) -> str:
                 value = payload.get(key)
                 if value:
                     return str(value)
+    return ""
+
+
+def _latest_non_synthetic_record_timestamp(records: List[Dict[str, Any]], extract_text) -> str:
+    for record in reversed(records):
+        text = extract_text(record)
+        if not text or _is_pr_watch_synthetic_text(text):
+            continue
+        timestamp = _record_timestamp(record)
+        if timestamp:
+            return timestamp
+    return ""
+
+
+def _record_timestamp(record: Dict[str, Any]) -> str:
+    for key in ("timestamp", "updated_at", "created_at"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    payload = record.get("payload")
+    if isinstance(payload, dict):
+        for key in ("timestamp", "updated_at", "created_at"):
+            value = payload.get(key)
+            if value:
+                return str(value)
     return ""
 
 

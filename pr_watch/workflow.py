@@ -16,6 +16,7 @@ CONFIRMATION_DELIVERY_STATUSES = {
     "awaiting_first_binding_confirmation",
     "awaiting_rebind_confirmation",
 }
+STALE_SESSION_RECENCY_SECONDS = 6 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -25,13 +26,21 @@ class SessionCandidate:
     evidence: List[str]
     rank: int
     active_rank: int
+    host_rank: int
     focus_score: int
     evidence_score: int
     activity_ts: float
 
     @property
-    def decisive_key(self) -> Tuple[int, int, int, int, float]:
-        return (self.rank, self.focus_score, self.active_rank, self.evidence_score, self.activity_ts)
+    def decisive_key(self) -> Tuple[int, int, int, int, int, float]:
+        return (
+            self.rank,
+            self.active_rank,
+            self.host_rank,
+            self.focus_score,
+            self.evidence_score,
+            self.activity_ts,
+        )
 
 
 @dataclass(frozen=True)
@@ -67,13 +76,6 @@ def create_explicit_binding(
         confirmed=True,
         confirmation_source="explicit_bind",
         evidence=["explicit user binding"],
-    )
-    store.deactivate_confirmed_bindings(
-        binding.repo_owner,
-        binding.repo_name,
-        binding.pr_number,
-        binding.role,
-        except_binding_id=binding.binding_id,
     )
     return binding
 
@@ -300,22 +302,31 @@ def binding_for_confirmation(
 
 
 def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[SessionInfo]) -> InboxItem:
-    selection = select_session_candidate(event.pr, sessions)
-    confirmed = store.find_confirmed_binding(event)
-    if confirmed:
-        rebind_item = route_confirmed_event_with_session_discovery(store, event, confirmed, selection)
+    session_list = list(sessions)
+    confirmed_bindings = store.list_confirmed_bindings(event)
+    if confirmed_bindings:
+        primary_confirmed = confirmed_bindings[0]
+        selection = select_session_candidate(
+            event.pr,
+            sessions_without_confirmed_bindings(session_list, confirmed_bindings),
+        )
+        rebind_item = route_confirmed_event_with_session_discovery(store, event, confirmed_bindings, selection)
         if rebind_item:
             return rebind_item
-        evidence = confirmed.evidence + ["confirmed binding matched this PR and role"]
+        evidence = primary_confirmed.evidence + [
+            "confirmed binding matched this PR and role",
+            *active_binding_evidence(confirmed_bindings),
+        ]
         return store.upsert_event(
             event,
             status="pending",
             delivery_status="awaiting_approval",
-            binding_id=confirmed.binding_id,
+            binding_id=primary_confirmed.binding_id,
             confidence="high",
             evidence=evidence,
         )
 
+    selection = select_session_candidate(event.pr, session_list)
     if selection.ambiguous_candidates:
         return store.upsert_event(
             event,
@@ -354,7 +365,7 @@ def route_event(store: StateStore, event: ClassifiedEvent, sessions: Iterable[Se
 def route_confirmed_event_with_session_discovery(
     store: StateStore,
     event: ClassifiedEvent,
-    confirmed: Binding,
+    confirmed_bindings: List[Binding],
     selection: SessionCandidateSelection,
 ) -> Optional[InboxItem]:
     if selection.ambiguous_candidates:
@@ -365,14 +376,14 @@ def route_confirmed_event_with_session_discovery(
             binding_id=None,
             confidence=selection.ambiguous_candidates[0].confidence,
             evidence=ambiguous_candidate_evidence(selection.ambiguous_candidates)
-            + ["active confirmed binding kept unchanged until a session is chosen"],
+            + ["active confirmed bindings kept unchanged until a session is chosen"],
         )
 
     candidate = selection.candidate
     if candidate is None:
         return None
 
-    if same_session(confirmed, candidate.session):
+    if any(same_session(confirmed, candidate.session) for confirmed in confirmed_bindings):
         return None
 
     if candidate.confidence == "high":
@@ -392,8 +403,8 @@ def route_confirmed_event_with_session_discovery(
             confidence="high",
             evidence=candidate.evidence
             + [
-                f"active binding still points to {confirmed.agent}:{confirmed.session_id}",
-                "confirm rebind before mirroring to the new active session",
+                *active_binding_evidence(confirmed_bindings),
+                "confirm additional session before mirroring to it",
             ],
         )
 
@@ -409,6 +420,25 @@ def route_confirmed_event_with_session_discovery(
         )
 
     return None
+
+
+def active_binding_evidence(bindings: List[Binding]) -> List[str]:
+    if len(bindings) == 1:
+        binding = bindings[0]
+        return [f"active binding includes {binding.agent}:{binding.session_id}"]
+    labels = ", ".join(f"{binding.agent}:{binding.session_id}" for binding in bindings)
+    return [f"active bindings include {labels}"]
+
+
+def sessions_without_confirmed_bindings(
+    sessions: Iterable[SessionInfo],
+    confirmed_bindings: List[Binding],
+) -> List[SessionInfo]:
+    return [
+        session
+        for session in sessions
+        if not any(same_session(binding, session) for binding in confirmed_bindings)
+    ]
 
 
 def create_inferred_binding(
@@ -436,6 +466,62 @@ def create_inferred_binding(
         active=False,
         confirmation_source=confirmation_source,
         evidence=evidence,
+        binding_id=binding_id,
+    )
+
+
+def ensure_silent_author_binding(
+    store: StateStore,
+    pr: PullRequestRef,
+    sessions: Iterable[SessionInfo],
+) -> Optional[Binding]:
+    author_event = ClassifiedEvent(
+        pr=pr,
+        role="author",
+        event_type="silent_author_pr_binding",
+        summary=f"PR #{pr.number} author session binding",
+        actor="pr-watch",
+        actionable=False,
+        dedupe_key=stable_id("silent-author-binding", pr.repo_full_name, pr.number),
+    )
+    if store.list_confirmed_bindings(author_event):
+        return None
+
+    selection = select_session_candidate(pr, sessions)
+    if selection.ambiguous_candidates or selection.candidate is None:
+        return None
+    if selection.candidate.confidence != "high":
+        return None
+
+    session = selection.candidate.session
+    existing = store.find_binding_for_session(
+        pr.owner,
+        pr.repo,
+        pr.number,
+        "author",
+        session.session_id,
+    )
+    if existing is not None:
+        return existing if existing.confirmed and existing.active else None
+
+    binding_id = stable_id("binding", pr.repo_full_name, pr.number, "author", session.agent, session.session_id)
+    return store.create_binding(
+        repo_owner=pr.owner,
+        repo_name=pr.repo,
+        pr_number=pr.number,
+        pr_url=pr.url,
+        role="author",
+        agent=session.agent,
+        session_id=session.session_id,
+        cwd=session.cwd,
+        branch=session.branch,
+        host=session.host,
+        confidence="high",
+        confirmed=True,
+        active=True,
+        confirmation_source="silent_author_pr_binding",
+        evidence=selection.candidate.evidence
+        + ["silently bound current user's authored PR to matching session without notifying"],
         binding_id=binding_id,
     )
 
@@ -485,6 +571,7 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
                     evidence=evidence,
                     rank=rank,
                     active_rank=1 if is_active_or_focused_session(session) else 0,
+                    host_rank=session_host_rank(session),
                     focus_score=session_focus_score(pr, session),
                     evidence_score=len(evidence),
                     activity_ts=session_activity_ts(session),
@@ -496,8 +583,9 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
     ranked.sort(
         key=lambda candidate: (
             candidate.rank,
-            candidate.focus_score,
             candidate.active_rank,
+            candidate.host_rank,
+            candidate.focus_score,
             candidate.evidence_score,
             candidate.activity_ts,
             candidate.session.agent,
@@ -506,6 +594,7 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
         reverse=True,
     )
     best = ranked[0]
+    best = prefer_recent_repo_session_over_stale_focus(best, ranked)
     top_ties = [candidate for candidate in ranked if candidate.decisive_key == best.decisive_key]
     if best.rank >= CONFIDENCE_RANK["medium"] and len(top_ties) > 1:
         return SessionCandidateSelection(candidate=None, ambiguous_candidates=top_ties)
@@ -516,11 +605,65 @@ def select_session_candidate(pr: PullRequestRef, sessions: Iterable[SessionInfo]
         evidence=annotated_selection_evidence(best, ranked),
         rank=best.rank,
         active_rank=best.active_rank,
+        host_rank=best.host_rank,
         focus_score=best.focus_score,
         evidence_score=best.evidence_score,
         activity_ts=best.activity_ts,
     )
     return SessionCandidateSelection(candidate=annotated, ambiguous_candidates=[])
+
+
+def prefer_recent_repo_session_over_stale_focus(
+    best: SessionCandidate,
+    ranked: List[SessionCandidate],
+) -> SessionCandidate:
+    if best.active_rank:
+        return best
+
+    fresher = [
+        candidate
+        for candidate in ranked
+        if candidate is not best
+        and candidate.rank == best.rank
+        and candidate.activity_ts - best.activity_ts >= STALE_SESSION_RECENCY_SECONDS
+        and candidate_has_repo_worktree_evidence(candidate)
+        and candidate_has_pr_anchor_evidence(candidate)
+    ]
+    if not fresher:
+        return best
+
+    chosen = max(
+        fresher,
+        key=lambda candidate: (
+            candidate.activity_ts,
+            candidate.evidence_score,
+            candidate.focus_score,
+            candidate.session.agent,
+            candidate.session.session_id,
+        ),
+    )
+    return SessionCandidate(
+        confidence=chosen.confidence,
+        session=chosen.session,
+        evidence=chosen.evidence + ["preferred newer matching session over stale focused candidate"],
+        rank=chosen.rank,
+        active_rank=chosen.active_rank,
+        host_rank=chosen.host_rank,
+        focus_score=chosen.focus_score,
+        evidence_score=chosen.evidence_score,
+        activity_ts=chosen.activity_ts,
+    )
+
+
+def candidate_has_repo_worktree_evidence(candidate: SessionCandidate) -> bool:
+    return any("session cwd matches repo name" in item for item in candidate.evidence)
+
+
+def candidate_has_pr_anchor_evidence(candidate: SessionCandidate) -> bool:
+    return any(
+        "PR URL" in item or "PR #" in item or "PR branch" in item
+        for item in candidate.evidence
+    )
 
 
 def annotated_selection_evidence(best: SessionCandidate, ranked: List[SessionCandidate]) -> List[str]:
@@ -530,6 +673,8 @@ def annotated_selection_evidence(best: SessionCandidate, ranked: List[SessionCan
         return evidence
     if best.active_rank and any(peer.active_rank < best.active_rank for peer in peers):
         evidence.append("preferred active or focused session over other matching candidates")
+    if best.host_rank and any(peer.host_rank < best.host_rank for peer in peers):
+        evidence.append("preferred Conductor session over non-Conductor candidates")
     if best.focus_score and all(best.focus_score > peer.focus_score for peer in peers):
         evidence.append("preferred PR-focused session over PR listing or triage candidates")
     if best.activity_ts and all(best.activity_ts > peer.activity_ts for peer in peers):
@@ -640,6 +785,10 @@ def _distinct_pr_mentions(text: str) -> int:
 def is_active_or_focused_session(session: SessionInfo) -> bool:
     marker = " ".join([str(session.host or ""), session.title]).lower()
     return any(token in marker for token in ("active", "focused", "foreground", "current"))
+
+
+def session_host_rank(session: SessionInfo) -> int:
+    return 1 if (session.host or "").strip().lower() == "conductor" else 0
 
 
 def session_activity_ts(session: SessionInfo) -> float:

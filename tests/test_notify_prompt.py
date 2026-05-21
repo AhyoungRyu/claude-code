@@ -127,12 +127,14 @@ class NotifyPromptTests(unittest.TestCase):
 
             prompt = render_notify_prompt(event)
 
-        self.assertIn("PR Watch: PR #1049 has an update", prompt)
-        self.assertIn("PR #1049", prompt)
-        self.assertIn("sendbird/ai-agent-js", prompt)
-        self.assertIn("bang9 pushed new commits to PR #1049", prompt)
-        self.assertIn("bang9:", prompt)
-        self.assertIn(PR_URL, prompt)
+        self.assertIn("PR Watch: sendbird/ai-agent-js#1049 has an update", prompt)
+        self.assertIn("Event time:", prompt)
+        self.assertIn("bang9 pushed new commits to PR in sendbird/ai-agent-js#1049", prompt)
+        self.assertNotIn("Repo:", prompt)
+        self.assertNotIn("Link:", prompt)
+        self.assertNotIn("Event id:", prompt)
+        self.assertNotIn("pr-watch:", prompt)
+        self.assertNotIn(PR_URL, prompt)
         self.assertIn("Suggested replies:", prompt)
         self.assertIn("Inspect update", prompt)
         self.assertIn("Queue for later", prompt)
@@ -148,6 +150,46 @@ class NotifyPromptTests(unittest.TestCase):
         ]:
             self.assertIn(forbidden, lower_prompt)
         self.assertIn("inspect", lower_prompt)
+
+    def test_render_notify_prompt_collapses_requested_review_pr_context_to_one_line(self):
+        render_notify_prompt = getattr(delivery, "render_notify_prompt", None)
+        self.assertIsNotNone(render_notify_prompt, "delivery.render_notify_prompt should exist")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event, _binding = make_confirmed_event(store, number=1088)
+            event = store.update_event(
+                event.event_id,
+                evidence=event.evidence,
+            )
+            event = store.upsert_event(
+                ClassifiedEvent(
+                    pr=PullRequestRef(
+                        owner="sendbird",
+                        repo="ai-agent-js",
+                        number=1088,
+                        url="https://github.com/sendbird/ai-agent-js/pull/1088",
+                    ),
+                    role="reviewer",
+                    event_type="review_requested",
+                    summary="You were requested to review PR #1088.",
+                    actor="OnestarLee",
+                    actionable=True,
+                    dedupe_key="notify-prompt:1088:review-requested",
+                ),
+                status="pending",
+                delivery_status="awaiting_approval",
+                binding_id=event.binding_id,
+                confidence="high",
+                evidence=["test event"],
+            )
+
+            prompt = render_notify_prompt(event)
+
+        self.assertIn("OnestarLee: You were requested to review PR in sendbird/ai-agent-js#1088.", prompt)
+        self.assertNotIn("Repo:", prompt)
+        self.assertNotIn("Link:", prompt)
+        self.assertNotIn("Event id:", prompt)
+        self.assertNotIn("pr-watch:", prompt)
 
     def test_render_confirmation_prompt_tells_agent_to_wait_without_tools_or_file_reads(self):
         render_confirmation_prompt = getattr(delivery, "render_confirmation_prompt", None)
@@ -397,6 +439,13 @@ class NotifyPromptTests(unittest.TestCase):
             self.assertEqual(2, count)
             self.assertTrue(any("Suggested replies:" in content for content in contents))
             self.assertTrue(any(f"pr-watch:event_id={event.event_id}" in content for content in contents))
+            self.assertFalse(
+                any(
+                    content.startswith("PR Watch:")
+                    and f"pr-watch:event_id={event.event_id}" in content
+                    for content in contents
+                )
+            )
             self.assertIsNotNone(store.get_host_sync(event.event_id, "conductor", "conductor-session-1"))
 
     def test_cli_notify_prompt_queues_soft_prompt_without_external_resume_when_state_unknown(self):

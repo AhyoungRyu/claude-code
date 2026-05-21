@@ -1,3 +1,4 @@
+import json
 import os
 import plistlib
 import sqlite3
@@ -159,10 +160,16 @@ class PrWatchTests(unittest.TestCase):
             prs[0]["reviewComments"],
         )
 
-    def test_auto_notification_mode_prefers_in_app_for_app_hosts(self):
+    def test_auto_notification_mode_uses_desktop_for_conductor_on_macos(self):
+        self.assertEqual(
+            "desktop",
+            resolve_notification_mode("auto", host="conductor", platform_name="Darwin"),
+        )
+
+    def test_auto_notification_mode_prefers_in_app_for_codex_app_hosts(self):
         self.assertEqual(
             "in_app",
-            resolve_notification_mode("auto", host="conductor", platform_name="Darwin"),
+            resolve_notification_mode("auto", host="mcp", platform_name="Darwin"),
         )
         self.assertEqual(
             "in_app",
@@ -345,28 +352,52 @@ class PrWatchTests(unittest.TestCase):
         self.assertNotIn("https://", title + message)
         self.assertNotIn("sendbird/ai-agent-js:", message)
 
-    def test_desktop_notification_omits_pr_url_from_macos_script(self):
+    def test_notify_event_general_desktop_opens_pr_url_with_pr_watch_icon(self):
+        from pr_watch.notifications import RecordingNotifier, notify_event
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = route_event(store, make_review_event(), sessions=[])
+            notifier = RecordingNotifier()
+
+            result = notify_event(store, event.event_id, mode="desktop", notifier=notifier)
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual(["desktop"], result.channels)
+            self.assertEqual(event.pr_url, notifier.messages[0]["open_url"])
+            self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
+            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
+
+    def test_desktop_notifier_uses_terminal_notifier_open_url_and_pr_watch_icon(self):
         from pr_watch.notifications import DesktopNotifier
 
         with tempfile.TemporaryDirectory() as tmpdir:
             event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+            icon_url = Path(tmpdir, "pr-watch.png").as_uri()
 
             with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
-                with patch("pr_watch.notifications.subprocess.run") as run:
-                    run.return_value.returncode = 0
-                    run.return_value.stderr = ""
-                    run.return_value.stdout = ""
+                with patch("pr_watch.notifications.shutil.which", return_value="/opt/homebrew/bin/terminal-notifier"):
+                    with patch("pr_watch.notifications.subprocess.run") as run:
+                        run.return_value.returncode = 0
+                        run.return_value.stderr = ""
+                        run.return_value.stdout = ""
 
-                    result = DesktopNotifier().send(
-                        "ai-agent-js #1049 needs attention",
-                        "bang9 pushed new commits to PR #1049",
-                        event,
-                    )
+                        result = DesktopNotifier().send(
+                            "ai-agent-js #1049 needs attention",
+                            "bang9 pushed new commits to PR #1049",
+                            event,
+                            open_url=event.pr_url,
+                            app_icon=icon_url,
+                        )
 
-        script = run.call_args.args[0][2]
+        command = run.call_args.args[0]
         self.assertTrue(result.ok)
-        self.assertNotIn(event.pr_url, script)
-        self.assertNotIn("subtitle", script)
+        self.assertEqual("/opt/homebrew/bin/terminal-notifier", command[0])
+        self.assertIn("-open", command)
+        self.assertEqual(event.pr_url, command[command.index("-open") + 1])
+        self.assertIn("-appIcon", command)
+        self.assertEqual(icon_url, command[command.index("-appIcon") + 1])
+        self.assertNotIn("-sender", command)
 
     def test_desktop_notification_uses_terminal_notifier_activation_when_host_is_known(self):
         from pr_watch.notifications import RecordingNotifier, notify_event
@@ -389,7 +420,128 @@ class PrWatchTests(unittest.TestCase):
             result = notify_event(store, inbox_item.event_id, mode="desktop", notifier=notifier)
 
             self.assertEqual("notified", result.action)
-            self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
+            self.assertEqual(["desktop_conductor"], result.channels)
+            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
+            self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
+            self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
+            self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
+
+    def test_desktop_notification_for_conductor_confirmation_explains_session_prompt(self):
+        from pr_watch.notifications import RecordingNotifier, notify_event
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="claude",
+                session_id="claude-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            inbox_item = store.upsert_event(
+                make_review_event("conductor-confirmation"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=binding.binding_id,
+                confidence="high",
+                evidence=["candidate"],
+            )
+            notifier = RecordingNotifier()
+
+            result = notify_event(store, inbox_item.event_id, mode="desktop", notifier=notifier)
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual(["desktop_conductor"], result.channels)
+            self.assertIn("confirm Conductor session", notifier.messages[0]["title"])
+            self.assertIn("Open Conductor", notifier.messages[0]["message"])
+            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
+            self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
+            self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
+            self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
+
+    def test_conductor_session_notification_retries_failed_notification(self):
+        from pr_watch.notifications import CONDUCTOR_DESKTOP_CHANNEL, RecordingNotifier, notify_conductor_session_event
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="claude",
+                session_id="claude-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            inbox_item = store.upsert_event(
+                make_review_event("retry-failed-conductor-notification"),
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+                binding_id=binding.binding_id,
+                confidence="high",
+                evidence=["candidate"],
+            )
+            store.upsert_notification(
+                event_id=inbox_item.event_id,
+                channel=CONDUCTOR_DESKTOP_CHANNEL,
+                title="old title",
+                message="old message",
+                target_url="conductor://",
+                status="failed",
+                error="'conductor://' is not a valid URI",
+            )
+            notifier = RecordingNotifier()
+
+            result = notify_conductor_session_event(store, inbox_item.event_id, notifier=notifier)
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual(1, len(notifier.messages))
+            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
+            self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
+            notification = store.get_notification(inbox_item.event_id, CONDUCTOR_DESKTOP_CHANNEL)
+            self.assertEqual("sent", notification.status)
+            self.assertEqual("conductor://open", notification.target_url)
+            self.assertEqual("", notification.error)
+
+    def test_desktop_notifier_refuses_clickable_conductor_url_without_terminal_notifier(self):
+        from pr_watch.notifications import DesktopNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+
+            with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
+                with patch("pr_watch.notifications.shutil.which", return_value=None):
+                    with patch("pr_watch.notifications.subprocess.run") as run:
+                        result = DesktopNotifier().send(
+                            "ai-agent-js #1049 needs attention",
+                            "bang9 pushed new commits to PR #1049",
+                            event,
+                            activation_bundle_id="com.conductor.app",
+                            open_url="conductor://open",
+                        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("terminal-notifier", result.error)
+        run.assert_not_called()
 
     def test_desktop_notifier_activates_host_with_terminal_notifier_when_available(self):
         from pr_watch.notifications import DesktopNotifier
@@ -417,6 +569,38 @@ class PrWatchTests(unittest.TestCase):
         self.assertIn("-activate", command)
         self.assertEqual("com.conductor.app", command[command.index("-activate") + 1])
         self.assertNotIn(event.pr_url, command)
+
+    def test_desktop_notifier_uses_pr_watch_icon_and_conductor_open_url_when_available(self):
+        from pr_watch.notifications import DesktopNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+            icon_url = Path(tmpdir, "pr-watch.png").as_uri()
+
+            with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
+                with patch("pr_watch.notifications.shutil.which", return_value="/opt/homebrew/bin/terminal-notifier"):
+                    with patch("pr_watch.notifications.subprocess.run") as run:
+                        run.return_value.returncode = 0
+                        run.return_value.stderr = ""
+                        run.return_value.stdout = ""
+
+                        result = DesktopNotifier().send(
+                            "ai-agent-js #1049 needs attention",
+                            "bang9 pushed new commits to PR #1049",
+                            event,
+                            activation_bundle_id="com.conductor.app",
+                            open_url="conductor://open",
+                            app_icon=icon_url,
+                        )
+
+        command = run.call_args.args[0]
+        self.assertTrue(result.ok)
+        self.assertNotIn("-sender", command)
+        self.assertIn("-appIcon", command)
+        self.assertEqual(icon_url, command[command.index("-appIcon") + 1])
+        self.assertIn("-open", command)
+        self.assertEqual("conductor://open", command[command.index("-open") + 1])
+        self.assertNotIn("-activate", command)
 
     def test_poll_once_skips_draft_prs_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -488,6 +672,128 @@ class PrWatchTests(unittest.TestCase):
 
             self.assertEqual(1, len(items))
             self.assertEqual("author_push_after_review", items[0].event_type)
+
+    def test_poll_once_silently_binds_authored_pr_session_without_actionable_event(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1093,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1093",
+                    "title": "Move scroll-to-bottom coverage",
+                    "headRefName": "fix/react-e2e-scroll-to-bottom-deterministic",
+                    "isDraft": false,
+                    "author": {"login": "irene"},
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "statusCheckRollup": [
+                      {"name": "run-test", "conclusion": "SUCCESS"}
+                    ],
+                    "comments": [
+                      {"author": {"login": "netlify", "type": "Bot"}, "body": "Deploy Preview ready"}
+                    ],
+                    "updatedAt": "2026-05-20T09:34:14Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            session = SessionInfo(
+                agent="codex",
+                session_id="codex-pr-1093",
+                title="Resolve issue",
+                cwd="/Users/irene.ryu/conductor/repo/ai-agent-js/raleigh",
+                branch="fix/react-e2e-scroll-to-bottom-deterministic",
+                text="PR 생성했습니다: https://github.com/sendbird/ai-agent-js/pull/1093",
+                host="conductor",
+                last_activity_at="2026-05-20T09:35:43Z",
+            )
+
+            items = poll_once(store, "irene", fixture=str(fixture), sessions=[session])
+
+            self.assertEqual([], items)
+            bindings = store.list_bindings()
+            self.assertEqual(1, len(bindings))
+            binding = bindings[0]
+            self.assertEqual("author", binding.role)
+            self.assertEqual(1093, binding.pr_number)
+            self.assertEqual("codex-pr-1093", binding.session_id)
+            self.assertTrue(binding.confirmed)
+            self.assertTrue(binding.active)
+            self.assertEqual("silent_author_pr_binding", binding.confirmation_source)
+
+    def test_silent_authored_pr_binding_routes_future_author_event_to_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            session = SessionInfo(
+                agent="codex",
+                session_id="codex-pr-1093",
+                title="Resolve issue",
+                cwd="/Users/irene.ryu/conductor/repo/ai-agent-js/raleigh",
+                branch="fix/react-e2e-scroll-to-bottom-deterministic",
+                text="PR 생성했습니다: https://github.com/sendbird/ai-agent-js/pull/1093",
+                host="conductor",
+                last_activity_at="2026-05-20T09:35:43Z",
+            )
+            clean_fixture = Path(tmpdir) / "clean-prs.json"
+            clean_fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1093,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1093",
+                    "headRefName": "fix/react-e2e-scroll-to-bottom-deterministic",
+                    "isDraft": false,
+                    "author": {"login": "irene"},
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "statusCheckRollup": [
+                      {"name": "run-test", "conclusion": "SUCCESS"}
+                    ],
+                    "updatedAt": "2026-05-20T09:34:14Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            failing_fixture = Path(tmpdir) / "failing-prs.json"
+            failing_fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1093,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1093",
+                    "headRefName": "fix/react-e2e-scroll-to-bottom-deterministic",
+                    "isDraft": false,
+                    "author": {"login": "irene"},
+                    "reviewDecision": "REVIEW_REQUIRED",
+                    "statusCheckRollup": [
+                      {"name": "run-test", "conclusion": "FAILURE"}
+                    ],
+                    "updatedAt": "2026-05-20T09:40:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+
+            poll_once(store, "irene", fixture=str(clean_fixture), sessions=[session])
+            items = poll_once(store, "irene", fixture=str(failing_fixture), sessions=[])
+
+            self.assertEqual(1, len(items))
+            self.assertEqual("ci_failed", items[0].event_type)
+            self.assertEqual("pending", items[0].status)
+            self.assertEqual("awaiting_approval", items[0].delivery_status)
+            binding = store.get_binding(items[0].binding_id)
+            self.assertEqual("codex-pr-1093", binding.session_id)
+            self.assertEqual("silent_author_pr_binding", binding.confirmation_source)
 
     def test_mcp_handlers_share_watcher_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1306,7 +1612,7 @@ class PrWatchTests(unittest.TestCase):
                 columns = {row[1] for row in conn.execute("pragma table_info(bindings)").fetchall()}
             self.assertIn("active", columns)
 
-    def test_find_confirmed_binding_ignores_superseded_inactive_bindings(self):
+    def test_find_confirmed_binding_returns_newest_active_binding_without_superseding_others(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
             old_binding = create_explicit_binding(
@@ -1332,10 +1638,16 @@ class PrWatchTests(unittest.TestCase):
             confirmed = store.confirm_binding(new_candidate.binding_id)
 
             self.assertTrue(confirmed.active)
-            self.assertFalse(store.get_binding(old_binding.binding_id).active)
-            self.assertEqual(confirmed.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
+            self.assertTrue(store.get_binding(old_binding.binding_id).active)
+            active = [
+                binding.session_id
+                for binding in store.list_bindings()
+                if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
+            ]
+            self.assertEqual(["codex-new", "codex-old"], sorted(active))
+            self.assertIn(store.find_confirmed_binding(make_review_event()).session_id, active)
 
-    def test_explicit_bind_supersedes_previous_active_binding(self):
+    def test_explicit_bind_adds_active_binding_without_superseding_previous_one(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
             old_binding = create_explicit_binding(
@@ -1353,9 +1665,15 @@ class PrWatchTests(unittest.TestCase):
                 session_id="codex-new",
             )
 
-            self.assertFalse(store.get_binding(old_binding.binding_id).active)
+            self.assertTrue(store.get_binding(old_binding.binding_id).active)
             self.assertTrue(store.get_binding(new_binding.binding_id).active)
-            self.assertEqual(new_binding.binding_id, store.find_confirmed_binding(make_review_event()).binding_id)
+            active = [
+                binding.session_id
+                for binding in store.list_bindings()
+                if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
+            ]
+            self.assertEqual(["codex-new", "codex-old"], sorted(active))
+            self.assertIn(store.find_confirmed_binding(make_review_event()).session_id, active)
 
     def test_confirm_binding_for_event_confirms_without_queueing_or_resuming(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1860,6 +2178,81 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("codex-active", binding.session_id)
             self.assertIn("active or focused session", " ".join(inbox_item.evidence))
 
+    def test_recent_repo_session_beats_stale_focused_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            stale_focused_session = SessionInfo(
+                agent="claude",
+                session_id="stale-claude",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=(
+                    f"Review {PR_URL}\n"
+                    "pull/1049#discussion_r123\n"
+                    "pulls/1049/comments"
+                ),
+                host="conductor",
+                last_activity_at="2026-05-11T09:00:00Z",
+            )
+            current_codex_session = SessionInfo(
+                agent="codex",
+                session_id="current-codex",
+                title="Working on ai-agent-js",
+                cwd="/repo/ai-agent-js",
+                branch="feature/fix-ci",
+                text=f"Continuing work for {PR_URL}",
+                host="codex_cli",
+                last_activity_at="2026-05-12T09:30:00Z",
+            )
+
+            inbox_item = route_event(
+                store,
+                make_review_event("recent-repo-session"),
+                sessions=[stale_focused_session, current_codex_session],
+            )
+            binding = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("current-codex", binding.session_id)
+            self.assertIn("newer matching session", " ".join(inbox_item.evidence))
+
+    def test_conductor_pr_session_beats_codex_cli_meta_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            event = make_inbox_event("sendbird", "ai-agent-js", 1089, "conductor-over-cli")
+            conductor_session = SessionInfo(
+                agent="claude",
+                session_id="conductor-review-1089",
+                title="Resolve issue",
+                cwd="/Users/irene.ryu/conductor/repo/ai-agent-js/washington-v1",
+                branch="",
+                text="Reviewing https://github.com/sendbird/ai-agent-js/pull/1089",
+                host="conductor",
+                last_activity_at="2026-05-21T01:00:00Z",
+            )
+            cli_meta_session = SessionInfo(
+                agent="codex",
+                session_id="codex-meta",
+                title="PR Watch debugging",
+                cwd="/Users/irene.ryu/Documents/New project",
+                branch="1088",
+                text=(
+                    "Why did https://github.com/sendbird/ai-agent-js/pull/1089 notify me? "
+                    "Repo: sendbird/ai-agent-js origin/pr-1089"
+                ),
+                host="codex_cli",
+                last_activity_at="2026-05-21T04:00:00Z",
+            )
+
+            inbox_item = route_event(store, event, sessions=[cli_meta_session, conductor_session])
+            binding = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("conductor-review-1089", binding.session_id)
+            self.assertEqual("conductor", binding.host)
+            self.assertIn("preferred Conductor session", " ".join(inbox_item.evidence))
+
     def test_equally_likely_sessions_stay_in_inbox_until_user_binds_one(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
@@ -1947,7 +2340,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("awaiting_rebind_confirmation", rerouted.delivery_status)
             self.assertEqual(candidate.binding_id, rerouted.binding_id)
 
-    def test_confirmed_rebind_supersedes_previous_active_handler_for_future_events(self):
+    def test_confirmed_rebind_adds_active_handler_for_future_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from pr_watch.workflow import confirm_binding_for_event
 
@@ -1975,10 +2368,110 @@ class PrWatchTests(unittest.TestCase):
             next_item = route_event(store, make_review_event("future"), sessions=[])
 
             self.assertEqual("confirmed_binding", result["action"])
-            self.assertFalse(store.get_binding(old_binding.binding_id).active)
-            self.assertEqual("codex-new", store.find_confirmed_binding(make_review_event()).session_id)
-            self.assertEqual(rebind_item.binding_id, next_item.binding_id)
+            self.assertTrue(store.get_binding(old_binding.binding_id).active)
             self.assertEqual("awaiting_approval", next_item.delivery_status)
+            active = [
+                binding.session_id
+                for binding in store.list_bindings()
+                if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
+            ]
+            active_binding_ids = [
+                binding.binding_id
+                for binding in store.list_bindings()
+                if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
+            ]
+            self.assertEqual(["codex-new", "codex-old"], sorted(active))
+            self.assertIn(next_item.binding_id, active_binding_ids)
+
+    def test_confirming_additional_session_keeps_existing_active_handler(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import confirm_binding_for_event
+
+            store = make_store(tmpdir)
+            old_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            new_session = SessionInfo(
+                agent="claude",
+                session_id="claude-new",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review-PRs",
+                text=f"/review-pr 1049\nReview {PR_URL}\npulls/1049/comments",
+                host="conductor",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+
+            candidate_item = route_event(store, make_review_event("additional-confirm"), sessions=[new_session])
+            result = confirm_binding_for_event(store, candidate_item.event_id, mirror_now=False)
+
+            active_bindings = [
+                binding
+                for binding in store.list_bindings()
+                if binding.repo_owner == "sendbird"
+                and binding.repo_name == "ai-agent-js"
+                and binding.pr_number == 1049
+                and binding.role == "reviewer"
+                and binding.confirmed
+                and binding.active
+            ]
+            active_sessions = sorted(f"{binding.agent}:{binding.session_id}" for binding in active_bindings)
+
+            self.assertEqual("confirmed_binding", result["action"])
+            self.assertTrue(store.get_binding(old_binding.binding_id).active)
+            self.assertEqual(["claude:claude-new", "codex:codex-old"], active_sessions)
+
+    def test_existing_active_session_does_not_hide_newer_additional_session_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            old_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-old",
+            )
+            old_session = SessionInfo(
+                agent="codex",
+                session_id=old_binding.session_id,
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text=(
+                    f"Review {PR_URL}\n"
+                    "origin/pr-1049\n"
+                    "pull/1049#discussion_r123\n"
+                    "pulls/1049/comments"
+                ),
+                host="conductor",
+                last_activity_at="2026-05-11T09:00:00Z",
+            )
+            newer_claude_session = SessionInfo(
+                agent="claude",
+                session_id="claude-new",
+                title="Review PR 1049",
+                cwd="/repo/ai-agent-js",
+                branch="review-PRs",
+                text=f"/review-pr 1049\nReview {PR_URL}\npulls/1049/comments",
+                host="conductor",
+                last_activity_at="2026-05-11T11:00:00Z",
+            )
+
+            inbox_item = route_event(
+                store,
+                make_review_event("additional-candidate"),
+                sessions=[old_session, newer_claude_session],
+            )
+            candidate = store.get_binding(inbox_item.binding_id)
+
+            self.assertEqual("needs_confirmation", inbox_item.status)
+            self.assertEqual("awaiting_rebind_confirmation", inbox_item.delivery_status)
+            self.assertEqual("claude-new", candidate.session_id)
+            self.assertTrue(store.get_binding(old_binding.binding_id).active)
 
     def test_ambiguous_rebind_candidates_do_not_use_old_active_binding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2811,7 +3304,7 @@ class PrWatchTests(unittest.TestCase):
             with redirect_stdout(StringIO()):
                 conductor_code = main(["--state-dir", tmpdir, "init", "--profile", "conductor"])
             self.assertEqual(0, conductor_code)
-            self.assertEqual("in_app", load_config(tmpdir)["notification_mode"])
+            self.assertEqual("desktop", load_config(tmpdir)["notification_mode"])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with redirect_stdout(StringIO()):
@@ -3251,6 +3744,266 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("/repo/claude-code", session.cwd)
             self.assertEqual("2026-05-12T04:30:00Z", session.last_activity_at)
             self.assertIn("AhyoungRyu/claude-code/pull/5", session.text)
+
+    def test_session_discovery_marks_conductor_codex_rollouts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            rollout = home / ".codex" / "sessions" / "2026" / "05" / "12"
+            rollout.mkdir(parents=True)
+            (rollout / "rollout-2026-05-12T13-14-27-conductor-codex.jsonl").write_text(
+                '{"type":"session_meta","payload":{"id":"conductor-codex",'
+                '"cwd":"/Users/irene.ryu/conductor/repo/ai-agent-js/kigali-v4",'
+                '"timestamp":"2026-05-12T04:14:27Z","source":"exec"}}\n'
+                '{"type":"event_msg","payload":{"type":"user_message","message":'
+                '"Test https://github.com/sendbird/ai-agent-js/pull/1049"},'
+                '"timestamp":"2026-05-12T04:30:00Z"}\n',
+                encoding="utf-8",
+            )
+
+            session = {item.session_id: item for item in discover_sessions(home)}["conductor-codex"]
+
+            self.assertEqual("codex", session.agent)
+            self.assertEqual("conductor", session.host)
+
+    def test_session_discovery_ignores_pr_watch_synthetic_claude_prompts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import score_session
+
+            home = Path(tmpdir)
+            claude_log = home / ".claude" / "projects" / "repo" / "session.jsonl"
+            claude_log.parent.mkdir(parents=True)
+            claude_log.write_text(
+                json.dumps(
+                    {
+                        "sessionId": "claude-pr-watch-loop",
+                        "cwd": "/repo/ai-agent-js",
+                        "message": {"content": "Working on unrelated repository setup."},
+                        "timestamp": "2026-05-12T04:30:00Z",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "sessionId": "claude-pr-watch-loop",
+                        "cwd": "/repo/ai-agent-js",
+                        "message": {
+                            "content": (
+                                "PR Watch: Is this the right session for PR sendbird/ai-agent-js#1049?\n"
+                                f"Link: {PR_URL}\n"
+                                "pr-watch:confirm_event_id=evt_old"
+                            )
+                        },
+                        "timestamp": "2026-05-12T05:30:00Z",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "type": "pr-link",
+                        "sessionId": "claude-pr-watch-loop",
+                        "prNumber": 1049,
+                        "prUrl": PR_URL,
+                        "prRepository": "sendbird/ai-agent-js",
+                        "timestamp": "2026-05-12T06:30:00Z",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            session = {item.session_id: item for item in discover_sessions(home)}["claude-pr-watch-loop"]
+            confidence, evidence = score_session(make_review_event().pr, session)
+
+            self.assertEqual("2026-05-12T04:30:00Z", session.last_activity_at)
+            self.assertNotIn("PR Watch:", session.text)
+            self.assertNotIn(PR_URL, session.text)
+            self.assertEqual("low", confidence)
+            self.assertNotIn("session text contains exact PR URL", " ".join(evidence))
+
+    def test_session_discovery_ignores_pr_watch_synthetic_codex_rollout_prompts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import score_session
+
+            home = Path(tmpdir)
+            rollout = home / ".codex" / "sessions" / "2026" / "05" / "12"
+            rollout.mkdir(parents=True)
+            (rollout / "rollout-2026-05-12T13-14-27-codex-pr-watch-loop.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "codex-pr-watch-loop",
+                            "cwd": "/repo/ai-agent-js",
+                            "timestamp": "2026-05-12T04:14:27Z",
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "Working on unrelated setup."},
+                        "timestamp": "2026-05-12T04:30:00Z",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": (
+                                "PR Watch: Is this the right session for PR sendbird/ai-agent-js#1049?\n"
+                                f"Link: {PR_URL}\n"
+                                "pr-watch:confirm_event_id=evt_old"
+                            ),
+                        },
+                        "timestamp": "2026-05-12T05:30:00Z",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            session = {item.session_id: item for item in discover_sessions(home)}["codex-pr-watch-loop"]
+            confidence, evidence = score_session(make_review_event().pr, session)
+
+            self.assertEqual("2026-05-12T04:30:00Z", session.last_activity_at)
+            self.assertNotIn("PR Watch:", session.text)
+            self.assertNotIn(PR_URL, session.text)
+            self.assertEqual("low", confidence)
+            self.assertNotIn("session text contains exact PR URL", " ".join(evidence))
+
+    def test_session_discovery_bounds_huge_codex_rollout_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            rollout = home / ".codex" / "sessions" / "2026" / "05" / "12"
+            rollout.mkdir(parents=True)
+            huge_output = "x" * 300_000
+            lines = [
+                '{"type":"session_meta","payload":{"id":"codex-huge",'
+                '"cwd":"/repo/ai-agent-js","timestamp":"2026-05-12T04:14:27Z"}}'
+            ]
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": f"Review {PR_URL}\n{huge_output}",
+                        },
+                        "timestamp": "2026-05-12T04:30:00Z",
+                    }
+                )
+            )
+            for index in range(90):
+                lines.append(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {"type": "agent_message", "message": huge_output},
+                            "timestamp": f"2026-05-12T04:31:{index % 60:02d}Z",
+                        }
+                    )
+                )
+            (rollout / "rollout-2026-05-12T13-14-27-codex-huge.jsonl").write_text(
+                "\n".join(lines) + "\n",
+                encoding="utf-8",
+            )
+
+            session = {item.session_id: item for item in discover_sessions(home)}["codex-huge"]
+
+            self.assertIn(PR_URL, session.text)
+            self.assertLess(len(session.text), 500_000)
+
+    def test_claude_session_discovery_keeps_initial_pr_anchor_for_long_sessions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pr_watch.workflow import score_session
+
+            home = Path(tmpdir)
+            claude_log = home / ".claude" / "projects" / "-Users-irene-ryu-conductor-repo-ai-agent-js-raleigh" / "session.jsonl"
+            claude_log.parent.mkdir(parents=True)
+            lines = [
+                json.dumps(
+                    {
+                        "sessionId": "claude-long",
+                        "cwd": "/Users/irene.ryu/conductor/repo/ai-agent-js/raleigh",
+                        "gitBranch": "review-PRs",
+                        "message": {
+                            "content": (
+                                "/review-pr 1049\n"
+                                f"Please review {PR_URL} and check pulls/1049/comments."
+                            )
+                        },
+                        "timestamp": "2026-05-19T04:17:32Z",
+                        "entrypoint": "sdk-ts",
+                    }
+                )
+            ]
+            for index in range(80):
+                lines.append(
+                    json.dumps(
+                        {
+                            "sessionId": "claude-long",
+                            "cwd": "/Users/irene.ryu/conductor/repo/ai-agent-js/raleigh",
+                            "gitBranch": "review-PRs",
+                            "message": {"content": f"tool output chunk {index} for sendbird/ai-agent-js"},
+                            "timestamp": f"2026-05-19T04:18:{index % 60:02d}Z",
+                            "entrypoint": "sdk-ts",
+                        }
+                    )
+                )
+            claude_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            session = {item.session_id: item for item in discover_sessions(home)}["claude-long"]
+            confidence, evidence = score_session(make_review_event().pr, session)
+
+            self.assertEqual("conductor", session.host)
+            self.assertIn(PR_URL, session.text)
+            self.assertEqual("high", confidence)
+            self.assertIn("session text contains exact PR URL", " ".join(evidence))
+
+    def test_claude_session_discovery_bounds_huge_records_while_preserving_pr_anchors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            claude_log = home / ".claude" / "projects" / "-Users-irene-ryu-conductor-repo-ai-agent-js-raleigh" / "session.jsonl"
+            claude_log.parent.mkdir(parents=True)
+            huge_output = "x" * 300_000
+            lines = [
+                json.dumps(
+                    {
+                        "sessionId": "claude-huge",
+                        "cwd": "/Users/irene.ryu/conductor/repo/ai-agent-js/raleigh",
+                        "gitBranch": "review-PRs",
+                        "message": {
+                            "content": (
+                                f"/review-pr 1049\n{PR_URL}\n"
+                                + huge_output
+                            )
+                        },
+                        "timestamp": "2026-05-19T04:17:32Z",
+                        "entrypoint": "sdk-ts",
+                    }
+                )
+            ]
+            for index in range(90):
+                lines.append(
+                    json.dumps(
+                        {
+                            "sessionId": "claude-huge",
+                            "cwd": "/Users/irene.ryu/conductor/repo-ai-agent-js/raleigh",
+                            "message": {"content": huge_output},
+                            "timestamp": f"2026-05-19T04:18:{index % 60:02d}Z",
+                            "entrypoint": "sdk-ts",
+                        }
+                    )
+                )
+            claude_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            session = {item.session_id: item for item in discover_sessions(home)}["claude-huge"]
+
+            self.assertIn(PR_URL, session.text)
+            self.assertLess(len(session.text), 500_000)
 
 
 if __name__ == "__main__":

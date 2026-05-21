@@ -19,6 +19,39 @@ def utc_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def format_local_time(value: str) -> str:
+    if not value:
+        return ""
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = _dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    local = parsed.astimezone()
+    return local.strftime("%Y-%m-%d %H:%M %Z").strip()
+
+
+def summarize_pr_event(actor: str, summary: str, repo_owner: str, repo_name: str, pr_number: int) -> str:
+    repo_ref = f"{repo_owner}/{repo_name}#{pr_number}"
+    body = _summary_with_repo_ref(summary, repo_ref, pr_number)
+    actor = str(actor or "").strip()
+    if actor and not body.lower().startswith(actor.lower()):
+        return f"{actor}: {body}"
+    return body
+
+
+def _summary_with_repo_ref(summary: str, repo_ref: str, pr_number: int) -> str:
+    body = str(summary or "").strip()
+    replacement = f"PR in {repo_ref}"
+    pattern = re.compile(rf"\bPR\s*#?{re.escape(str(pr_number))}\b", re.IGNORECASE)
+    updated, count = pattern.subn(replacement, body, count=1)
+    if count:
+        return updated
+    return f"{body} in {repo_ref}" if body else repo_ref
+
+
 def stable_id(*parts: object) -> str:
     payload = "\x1f".join(str(part) for part in parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]

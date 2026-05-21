@@ -7,8 +7,10 @@ from typing import Iterable, List, Optional
 from .conductor_adapter import (
     ConductorStatus,
     check_conductor_db,
+    confirmation_activity_after_prompt,
     mirror_confirmation_to_conductor,
     mirror_event_to_conductor,
+    visible_conductor_message_exists,
 )
 from .delivery import (
     CONFIRMATION_PROMPT_HOST,
@@ -18,12 +20,17 @@ from .delivery import (
     notify_prompt_event,
 )
 from .host_integration import CONDUCTOR_CODEX_BINARY
-from .models import Binding, InboxItem
+from .models import Binding, ClassifiedEvent, InboxItem, PullRequestRef
+from .notifications import notify_conductor_session_event
 from .state import StateStore
 
 
 SUPPORTED_HOSTS = {"conductor", "codex-app", "all"}
 CONDUCTOR_CONFIRMATION_HOST = "conductor_confirmation"
+CONFIRMATION_DELIVERY_STATUSES = {
+    "awaiting_first_binding_confirmation",
+    "awaiting_rebind_confirmation",
+}
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,7 @@ def sync_once(
     conductor_db_path: Optional[str | Path] = None,
     trigger_confirmed: bool = False,
     notify_prompt_confirmed: bool = False,
+    notifier: Optional[object] = None,
     runner: Optional[object] = None,
     session_state: str = "unknown",
     busy_policy: str = DEFAULT_BUSY_POLICY,
@@ -94,6 +102,7 @@ def sync_once(
                 store,
                 events,
                 conductor_db_path,
+                notifier=notifier,
                 runner=runner,
                 session_state=session_state,
                 notify_prompt_confirmed=notify_prompt_confirmed,
@@ -154,6 +163,7 @@ def _sync_conductor(
     store: StateStore,
     events: Iterable[InboxItem],
     conductor_db_path: Optional[str | Path],
+    notifier: Optional[object],
     runner: Optional[object],
     session_state: str,
     notify_prompt_confirmed: bool,
@@ -163,113 +173,180 @@ def _sync_conductor(
     reported_unavailable = False
 
     for event in events:
+        event = store.get_event(event.event_id)
         binding = store.get_binding(event.binding_id)
         if _needs_binding_confirmation(event, binding):
             assert binding is not None
-            existing_confirmation = store.get_host_sync(
-                event.event_id,
-                CONDUCTOR_CONFIRMATION_HOST,
-                binding.session_id,
-            ) or store.find_host_sync_for_binding(
-                binding.binding_id,
-                CONDUCTOR_CONFIRMATION_HOST,
-                binding.session_id,
-            )
-            if existing_confirmation is not None:
-                store.upsert_host_sync(
+            if conductor_status.available:
+                activity_evidence = confirmation_activity_after_prompt(
+                    conductor_status.db_path,
+                    event,
+                    binding,
+                )
+                if activity_evidence:
+                    confirmed = store.confirm_binding(
+                        binding.binding_id,
+                        source="auto_confirmed_by_session_activity",
+                    )
+                    _promote_confirmation_events_for_binding(
+                        store,
+                        confirmed,
+                        activity_evidence,
+                    )
+                    results.append(
+                        HostEventResult(
+                            host="conductor",
+                            event_id=event.event_id,
+                            action="auto_confirmed_by_session_activity",
+                            target_id=confirmed.session_id,
+                            message=activity_evidence,
+                        )
+                    )
+                    event = store.get_event(event.event_id)
+                    binding = store.get_binding(event.binding_id)
+                else:
+                    existing_confirmation = store.get_host_sync(
+                        event.event_id,
+                        CONDUCTOR_CONFIRMATION_HOST,
+                        binding.session_id,
+                    ) or store.find_host_sync_for_binding(
+                        binding.binding_id,
+                        CONDUCTOR_CONFIRMATION_HOST,
+                        binding.session_id,
+                    )
+                    if existing_confirmation is not None and visible_conductor_message_exists(
+                        conductor_status.db_path,
+                        binding.session_id,
+                        existing_confirmation.external_id,
+                    ):
+                        _notify_conductor_session_event(store, event, notifier)
+                        store.upsert_host_sync(
+                            event.event_id,
+                            CONDUCTOR_CONFIRMATION_HOST,
+                            binding.session_id,
+                            "confirmation_already_requested",
+                            external_id=existing_confirmation.external_id,
+                            error=existing_confirmation.error,
+                        )
+                        results.append(
+                            HostEventResult(
+                                host="conductor",
+                                event_id=event.event_id,
+                                action="confirmation_already_requested",
+                                target_id=binding.session_id,
+                                message="binding confirmation request already recorded; leaving event pending in inbox",
+                            )
+                        )
+                        continue
+                    mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
+                    if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
+                        store.upsert_host_sync(
+                            event.event_id,
+                            CONDUCTOR_CONFIRMATION_HOST,
+                            binding.session_id,
+                            mirrored.action,
+                            external_id=mirrored.message_id,
+                        )
+                        _notify_conductor_session_event(store, event, notifier)
+                    results.append(
+                        HostEventResult(
+                            host="conductor",
+                            event_id=event.event_id,
+                            action=mirrored.action,
+                            target_id=mirrored.session_id or binding.session_id,
+                            message=mirrored.message,
+                        )
+                    )
+                    continue
+
+            if binding is not None and binding.confirmed:
+                event = store.get_event(event.event_id)
+                binding = store.get_binding(event.binding_id)
+            if not _has_confirmed_binding(event, binding):
+                assert binding is not None
+                existing_confirmation = store.get_host_sync(
                     event.event_id,
                     CONDUCTOR_CONFIRMATION_HOST,
                     binding.session_id,
-                    "confirmation_already_requested",
-                    external_id=existing_confirmation.external_id,
-                    error=existing_confirmation.error,
+                ) or store.find_host_sync_for_binding(
+                    binding.binding_id,
+                    CONDUCTOR_CONFIRMATION_HOST,
+                    binding.session_id,
                 )
-                results.append(
-                    HostEventResult(
-                        host="conductor",
-                        event_id=event.event_id,
-                        action="confirmation_already_requested",
-                        target_id=binding.session_id,
-                        message="binding confirmation request already recorded; leaving event pending in inbox",
-                    )
-                )
-                continue
-            if conductor_status.available:
-                mirrored = mirror_confirmation_to_conductor(conductor_status.db_path, event, binding)
-                if mirrored.action in {"confirmation_requested", "confirmation_already_requested"}:
+                if existing_confirmation is not None:
                     store.upsert_host_sync(
                         event.event_id,
                         CONDUCTOR_CONFIRMATION_HOST,
                         binding.session_id,
-                        mirrored.action,
-                        external_id=mirrored.message_id,
+                        "confirmation_already_requested",
+                        external_id=existing_confirmation.external_id,
+                        error=existing_confirmation.error,
                     )
-                results.append(
-                    HostEventResult(
-                        host="conductor",
-                        event_id=event.event_id,
-                        action=mirrored.action,
-                        target_id=mirrored.session_id or binding.session_id,
-                        message=mirrored.message,
+                    results.append(
+                        HostEventResult(
+                            host="conductor",
+                            event_id=event.event_id,
+                            action="confirmation_already_requested",
+                            target_id=binding.session_id,
+                            message="binding confirmation request already recorded; leaving event pending in inbox",
+                        )
                     )
-                )
-                continue
-
-            existing_prompt = store.get_host_sync(
-                event.event_id,
-                CONFIRMATION_PROMPT_HOST,
-                binding.session_id,
-            )
-            if existing_prompt is not None and existing_prompt.status == "failed":
-                existing_prompt = None
-            if existing_prompt is None:
-                existing_prompt = store.find_host_sync_for_binding(
-                    binding.binding_id,
-                    CONFIRMATION_PROMPT_HOST,
-                    binding.session_id,
-                )
-            if existing_prompt is not None:
-                store.upsert_host_sync(
+                    continue
+                existing_prompt = store.get_host_sync(
                     event.event_id,
                     CONFIRMATION_PROMPT_HOST,
                     binding.session_id,
-                    existing_prompt.status,
-                    external_id=existing_prompt.external_id,
-                    error=existing_prompt.error,
                 )
-                results.append(
-                    HostEventResult(
-                        host="conductor",
-                        event_id=event.event_id,
-                        action=_confirmation_prompt_dedupe_action(existing_prompt.status),
-                        target_id=binding.session_id,
-                        message="binding confirmation prompt already recorded; leaving event pending in inbox",
+                if existing_prompt is not None and existing_prompt.status == "failed":
+                    existing_prompt = None
+                if existing_prompt is None:
+                    existing_prompt = store.find_host_sync_for_binding(
+                        binding.binding_id,
+                        CONFIRMATION_PROMPT_HOST,
+                        binding.session_id,
                     )
-                )
-                continue
+                if existing_prompt is not None:
+                    store.upsert_host_sync(
+                        event.event_id,
+                        CONFIRMATION_PROMPT_HOST,
+                        binding.session_id,
+                        existing_prompt.status,
+                        external_id=existing_prompt.external_id,
+                        error=existing_prompt.error,
+                    )
+                    results.append(
+                        HostEventResult(
+                            host="conductor",
+                            event_id=event.event_id,
+                            action=_confirmation_prompt_dedupe_action(existing_prompt.status),
+                            target_id=binding.session_id,
+                            message="binding confirmation prompt already recorded; leaving event pending in inbox",
+                        )
+                    )
+                    continue
 
-            delivered = confirmation_prompt_event(
-                store,
-                event.event_id,
-                runner=runner,
-                session_state=session_state,
-                codex_binary=_conductor_codex_binary(),
-            )
-            if delivered.action != "confirmation_prompt_skipped":
-                results.append(
-                    HostEventResult(
-                        host="conductor",
-                        event_id=event.event_id,
-                        action=delivered.action,
-                        target_id=binding.session_id,
-                        message=delivered.message,
-                    )
+                delivered = confirmation_prompt_event(
+                    store,
+                    event.event_id,
+                    runner=runner,
+                    session_state=session_state,
+                    codex_binary=_conductor_codex_binary(),
                 )
+                if delivered.action != "confirmation_prompt_skipped":
+                    results.append(
+                        HostEventResult(
+                            host="conductor",
+                            event_id=event.event_id,
+                            action=delivered.action,
+                            target_id=binding.session_id,
+                            message=delivered.message,
+                        )
+                    )
+                    continue
                 continue
+        confirmed_bindings = _confirmed_bindings_for_event(store, event, binding)
+        if not confirmed_bindings:
             continue
-        if not _has_confirmed_binding(event, binding):
-            continue
-        assert binding is not None
         if not conductor_status.available:
             if not reported_unavailable:
                 results.append(
@@ -282,26 +359,102 @@ def _sync_conductor(
                 )
                 reported_unavailable = True
             continue
-        mirrored = mirror_event_to_conductor(conductor_status.db_path, event, binding)
-        target_id = mirrored.session_id or binding.session_id
-        if mirrored.action in {"mirrored", "already_synced"}:
-            store.upsert_host_sync(
-                event.event_id,
-                "conductor",
-                target_id,
-                mirrored.action,
-                external_id=mirrored.message_id,
+        for confirmed_binding in confirmed_bindings:
+            mirrored = mirror_event_to_conductor(conductor_status.db_path, event, confirmed_binding)
+            target_id = mirrored.session_id or confirmed_binding.session_id
+            if mirrored.action in {"mirrored", "already_synced"}:
+                store.upsert_host_sync(
+                    event.event_id,
+                    "conductor",
+                    target_id,
+                    mirrored.action,
+                    external_id=mirrored.message_id,
+                )
+                _notify_conductor_session_event(store, event, notifier)
+            results.append(
+                HostEventResult(
+                    host="conductor",
+                    event_id=event.event_id,
+                    action=mirrored.action,
+                    target_id=target_id,
+                    message=mirrored.message,
+                )
             )
-        results.append(
-            HostEventResult(
-                host="conductor",
-                event_id=event.event_id,
-                action=mirrored.action,
-                target_id=target_id,
-                message=mirrored.message,
-            )
-        )
     return results
+
+
+def _notify_conductor_session_event(
+    store: StateStore,
+    event: InboxItem,
+    notifier: Optional[object],
+) -> None:
+    notify_conductor_session_event(store, event.event_id, notifier=notifier)
+
+
+def _confirmed_bindings_for_event(
+    store: StateStore,
+    event: InboxItem,
+    event_binding: Optional[Binding],
+) -> List[Binding]:
+    if not (
+        event.status == "pending"
+        and event.confidence == "high"
+    ):
+        return []
+
+    confirmed = store.list_confirmed_bindings(
+        ClassifiedEvent(
+            pr=event_pr_ref(event),
+            role=event.role,
+            event_type=event.event_type,
+            summary=event.summary,
+            actor=event.actor,
+            actionable=event.actionable,
+            dedupe_key=event.dedupe_key,
+            payload=event.payload,
+        )
+    )
+    if confirmed:
+        return confirmed
+    if _has_confirmed_binding(event, event_binding):
+        assert event_binding is not None
+        return [event_binding]
+    return []
+
+
+def event_pr_ref(event: InboxItem) -> PullRequestRef:
+    return PullRequestRef(
+        owner=event.repo_owner,
+        repo=event.repo_name,
+        number=event.pr_number,
+        url=event.pr_url,
+    )
+
+
+def _promote_confirmation_events_for_binding(
+    store: StateStore,
+    confirmed: Binding,
+    activity_evidence: str,
+) -> None:
+    for item in store.list_events(include_done=False):
+        if item.binding_id != confirmed.binding_id:
+            continue
+        if item.status != "needs_confirmation" or item.delivery_status not in CONFIRMATION_DELIVERY_STATUSES:
+            continue
+        store.update_event(
+            item.event_id,
+            status="pending",
+            delivery_status="awaiting_approval",
+            binding_id=confirmed.binding_id,
+            confidence="high",
+            evidence=item.evidence
+            + [
+                f"same-session PR activity confirmed active binding {confirmed.agent}:{confirmed.session_id}",
+                activity_evidence,
+            ],
+            recovery_command="",
+            error="",
+        )
 
 
 def _trigger_confirmed_events(
@@ -370,8 +523,7 @@ def _needs_binding_confirmation(event: InboxItem, binding: Optional[Binding]) ->
         and not binding.confirmed
         and event.status == "needs_confirmation"
         and event.confidence == "high"
-        and event.delivery_status
-        in {"awaiting_first_binding_confirmation", "awaiting_rebind_confirmation"}
+        and event.delivery_status in CONFIRMATION_DELIVERY_STATUSES
     )
 
 
