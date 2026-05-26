@@ -153,6 +153,23 @@ class StateStore:
             last_event_at=binding.last_event_at,
         )
         with self.connect() as conn:
+            if updated.confirmed and updated.active:
+                conn.execute(
+                    """
+                    update bindings
+                    set active = 0, updated_at = ?
+                    where lower(repo_owner) = lower(?) and lower(repo_name) = lower(?) and pr_number = ?
+                      and role = ? and confirmed = 1 and active = 1 and binding_id <> ?
+                    """,
+                    (
+                        now,
+                        updated.repo_owner,
+                        updated.repo_name,
+                        updated.pr_number,
+                        updated.role,
+                        updated.binding_id,
+                    ),
+                )
             conn.execute(
                 """
                 insert into bindings (
@@ -599,6 +616,46 @@ class StateStore:
         with self.connect() as conn:
             cursor = conn.execute(query, (utc_now(), *params))
         return cursor.rowcount
+
+    def deactivate_duplicate_active_confirmed_bindings(self, repo: Optional[str] = None) -> int:
+        params: List[Any] = []
+        query = """
+            select binding_id, repo_owner, repo_name, pr_number, role
+            from bindings
+            where confirmed = 1 and active = 1
+        """
+        if repo:
+            normalized = normalize_repo_full_name(repo)
+            repo_owner, repo_name = normalized.split("/", 1)
+            query += " and lower(repo_owner) = lower(?) and lower(repo_name) = lower(?)"
+            params.extend([repo_owner, repo_name])
+        query += """
+            order by lower(repo_owner), lower(repo_name), pr_number, role,
+              updated_at desc, created_at desc, binding_id desc
+        """
+
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            seen: set[tuple[str, str, int, str]] = set()
+            duplicate_ids: List[str] = []
+            for row in rows:
+                key = (
+                    str(row["repo_owner"]).lower(),
+                    str(row["repo_name"]).lower(),
+                    int(row["pr_number"]),
+                    str(row["role"]),
+                )
+                if key in seen:
+                    duplicate_ids.append(str(row["binding_id"]))
+                else:
+                    seen.add(key)
+            if not duplicate_ids:
+                return 0
+            conn.executemany(
+                "update bindings set active = 0, updated_at = ? where binding_id = ?",
+                [(utc_now(), binding_id) for binding_id in duplicate_ids],
+            )
+        return len(duplicate_ids)
 
     def dismiss_stale_current_pr_events(
         self,

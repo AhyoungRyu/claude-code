@@ -1627,7 +1627,7 @@ class PrWatchTests(unittest.TestCase):
                 columns = {row[1] for row in conn.execute("pragma table_info(bindings)").fetchall()}
             self.assertIn("active", columns)
 
-    def test_find_confirmed_binding_returns_newest_active_binding_without_superseding_others(self):
+    def test_confirming_binding_makes_same_pr_role_binding_primary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
             old_binding = create_explicit_binding(
@@ -1653,16 +1653,16 @@ class PrWatchTests(unittest.TestCase):
             confirmed = store.confirm_binding(new_candidate.binding_id)
 
             self.assertTrue(confirmed.active)
-            self.assertTrue(store.get_binding(old_binding.binding_id).active)
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
             active = [
                 binding.session_id
                 for binding in store.list_bindings()
                 if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
             ]
-            self.assertEqual(["codex-new", "codex-old"], sorted(active))
-            self.assertIn(store.find_confirmed_binding(make_review_event()).session_id, active)
+            self.assertEqual(["codex-new"], active)
+            self.assertEqual("codex-new", store.find_confirmed_binding(make_review_event()).session_id)
 
-    def test_explicit_bind_adds_active_binding_without_superseding_previous_one(self):
+    def test_explicit_bind_makes_same_pr_role_binding_primary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
             old_binding = create_explicit_binding(
@@ -1680,15 +1680,36 @@ class PrWatchTests(unittest.TestCase):
                 session_id="codex-new",
             )
 
-            self.assertTrue(store.get_binding(old_binding.binding_id).active)
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
             self.assertTrue(store.get_binding(new_binding.binding_id).active)
             active = [
                 binding.session_id
                 for binding in store.list_bindings()
                 if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
             ]
-            self.assertEqual(["codex-new", "codex-old"], sorted(active))
-            self.assertIn(store.find_confirmed_binding(make_review_event()).session_id, active)
+            self.assertEqual(["codex-new"], active)
+            self.assertEqual("codex-new", store.find_confirmed_binding(make_review_event()).session_id)
+
+    def test_primary_binding_scope_keeps_different_roles_active(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            reviewer = create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="reviewer-session",
+            )
+            author = create_explicit_binding(
+                store,
+                PR_URL,
+                role="author",
+                agent="claude",
+                session_id="author-session",
+            )
+
+            self.assertTrue(store.get_binding(reviewer.binding_id).active)
+            self.assertTrue(store.get_binding(author.binding_id).active)
 
     def test_confirm_binding_for_event_confirms_without_queueing_or_resuming(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2355,7 +2376,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("awaiting_rebind_confirmation", rerouted.delivery_status)
             self.assertEqual(candidate.binding_id, rerouted.binding_id)
 
-    def test_confirmed_rebind_adds_active_handler_for_future_events(self):
+    def test_confirmed_rebind_becomes_primary_for_future_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from pr_watch.workflow import confirm_binding_for_event
 
@@ -2383,7 +2404,7 @@ class PrWatchTests(unittest.TestCase):
             next_item = route_event(store, make_review_event("future"), sessions=[])
 
             self.assertEqual("confirmed_binding", result["action"])
-            self.assertTrue(store.get_binding(old_binding.binding_id).active)
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
             self.assertEqual("awaiting_approval", next_item.delivery_status)
             active = [
                 binding.session_id
@@ -2395,10 +2416,10 @@ class PrWatchTests(unittest.TestCase):
                 for binding in store.list_bindings()
                 if binding.confirmed and binding.active and binding.pr_number == 1049 and binding.role == "reviewer"
             ]
-            self.assertEqual(["codex-new", "codex-old"], sorted(active))
+            self.assertEqual(["codex-new"], active)
             self.assertIn(next_item.binding_id, active_binding_ids)
 
-    def test_confirming_additional_session_keeps_existing_active_handler(self):
+    def test_confirming_additional_session_replaces_existing_active_handler(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from pr_watch.workflow import confirm_binding_for_event
 
@@ -2437,8 +2458,8 @@ class PrWatchTests(unittest.TestCase):
             active_sessions = sorted(f"{binding.agent}:{binding.session_id}" for binding in active_bindings)
 
             self.assertEqual("confirmed_binding", result["action"])
-            self.assertTrue(store.get_binding(old_binding.binding_id).active)
-            self.assertEqual(["claude:claude-new", "codex:codex-old"], active_sessions)
+            self.assertFalse(store.get_binding(old_binding.binding_id).active)
+            self.assertEqual(["claude:claude-new"], active_sessions)
 
     def test_existing_active_session_does_not_hide_newer_additional_session_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3043,6 +3064,77 @@ class PrWatchTests(unittest.TestCase):
             self.assertFalse(store.get_binding(closed_confirmed.binding_id).active)
             self.assertFalse(store.get_binding(closed_candidate.binding_id).active)
             self.assertTrue(store.get_binding(unrelated_binding.binding_id).active)
+
+    def test_poll_once_deactivates_legacy_duplicate_active_bindings_for_same_pr_role(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "author": {"login": "bang9"},
+                    "updatedAt": "2026-05-12T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            old_reviewer = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url="https://github.com/sendbird/ai-agent-js/pull/1049",
+                role="reviewer",
+                agent="codex",
+                session_id="old-reviewer",
+                confirmed=True,
+                active=True,
+                evidence=["legacy old reviewer binding"],
+            )
+            new_reviewer = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url="https://github.com/sendbird/ai-agent-js/pull/1049",
+                role="reviewer",
+                agent="claude",
+                session_id="new-reviewer",
+                confirmed=True,
+                active=True,
+                evidence=["legacy new reviewer binding"],
+            )
+            author = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url="https://github.com/sendbird/ai-agent-js/pull/1049",
+                role="author",
+                agent="codex",
+                session_id="author",
+                confirmed=True,
+                active=True,
+                evidence=["author binding"],
+            )
+            with sqlite3.connect(store.path) as conn:
+                conn.execute(
+                    "update bindings set active = 1, updated_at = '2026-05-01T00:00:00Z' where binding_id = ?",
+                    (old_reviewer.binding_id,),
+                )
+                conn.execute(
+                    "update bindings set updated_at = '2026-05-02T00:00:00Z' where binding_id = ?",
+                    (new_reviewer.binding_id,),
+                )
+
+            poll_once(store, "irene", repo="sendbird/ai-agent-js", fixture=str(fixture), sessions=[])
+
+            self.assertFalse(store.get_binding(old_reviewer.binding_id).active)
+            self.assertTrue(store.get_binding(new_reviewer.binding_id).active)
+            self.assertTrue(store.get_binding(author.binding_id).active)
 
     def test_poll_once_dismisses_stale_open_pr_events_for_mixed_case_repo_owner(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -28,7 +28,7 @@ It is intentionally local-first:
 | GitHub access | Uses local `gh` authentication |
 | Polling | Explicit watched-repository allowlist |
 | Delivery | First inferred binding requires confirmation |
-| Sessions | Supports multiple active handlers for the same PR and role |
+| Sessions | Keeps one primary active handler per PR and role |
 | Notifications | Desktop, local in-app inbox, and Conductor-visible prompts are notification-only |
 
 Detailed behavior: [PR Watch overview](./docs/pr-watch/overview.md).

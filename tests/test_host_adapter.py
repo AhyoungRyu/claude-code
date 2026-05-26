@@ -382,7 +382,7 @@ class HostAdapterTests(unittest.TestCase):
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
             self.assertEqual(2, count)
 
-    def test_host_sync_fans_out_confirmed_event_to_all_active_bindings(self):
+    def test_host_sync_delivers_confirmed_event_to_primary_active_binding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "conductor.sqlite"
             create_conductor_db(
@@ -429,9 +429,9 @@ class HostAdapterTests(unittest.TestCase):
             result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
 
             actions = [item.action for item in result.host_results]
-            self.assertEqual(["mirrored", "mirrored"], actions)
+            self.assertEqual(["mirrored"], actions)
             targets = sorted(item.target_id for item in result.host_results)
-            self.assertEqual(["claude-conductor-session", "codex-conductor-session"], targets)
+            self.assertEqual(["claude-conductor-session"], targets)
             with sqlite3.connect(db_path) as conn:
                 rows = conn.execute(
                     """
@@ -443,7 +443,7 @@ class HostAdapterTests(unittest.TestCase):
                     """
                 ).fetchall()
             self.assertEqual(
-                [("claude-conductor-session", 2), ("codex-conductor-session", 2)],
+                [("claude-conductor-session", 2), ("codex-conductor-session", 0)],
                 rows,
             )
 

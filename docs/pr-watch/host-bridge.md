@@ -32,13 +32,15 @@ pr-watch service install --interval 120 --notification-mode auto --host-sync --h
 
 | User action | Command | Result |
 |-------------|---------|--------|
-| Confirm session | `pr-watch confirm-binding evt_123` | Adds or updates the active PR/session binding |
+| Confirm session | `pr-watch confirm-binding evt_123` | Makes that PR/session binding the active handler for this PR and role |
 | Confirm and mark handled | `pr-watch confirm-binding evt_123 --mark-handled` | Confirms binding and dismisses only that update |
 | Reject session | `pr-watch reject-binding evt_123` | Marks the candidate as wrong and keeps the event pending |
 | Ignore update | `pr-watch dismiss-event evt_123` | Closes the single event without PR action |
 | Approve delivery | `pr-watch approve evt_123 --session-state unknown` | Queues or resumes according to session state and busy policy |
 
 `confirm-binding` does not resume or queue the session unless `--trigger` is passed.
+
+Only one confirmed active binding is used as the delivery target for the same repository, PR number, and role. Older confirmed bindings remain in history but are deactivated when a newer binding is confirmed.
 
 ## Host Surfaces
 

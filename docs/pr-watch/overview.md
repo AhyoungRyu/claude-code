@@ -43,11 +43,12 @@ Notification prompts are deliberately separate from delivery. A desktop notifica
 |------|----------|
 | First likely match | Ask the user to confirm the session |
 | Confirmed binding exists | Reuse it for the same PR and role |
-| Multiple confirmed sessions | Keep all active handlers for that PR and role |
-| New high-confidence candidate | Ask whether to add it as another active handler |
+| Multiple confirmed sessions | Keep history, but only the newest confirmed active binding is the delivery target for that PR and role |
+| New high-confidence candidate | Ask whether to make it the active handler |
 | Ambiguous candidates | Leave the event pending for manual choice |
 | Low-confidence candidate | Avoid session-visible prompt; keep inbox decision |
 | PR no longer open | Deactivate its active bindings during repo polling |
+| Legacy duplicate active bindings | Deactivate older confirmed bindings during repo polling |
 
 When several local sessions match the same PR, PR Watch prefers active/focused host sessions when available, then Conductor sessions over CLI/meta sessions at the same confidence, then stronger PR evidence, then newest `last_activity_at`.
 

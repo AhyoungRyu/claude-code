@@ -53,6 +53,7 @@ PR Watch dedupes per event/channel. Duplicates can still happen when:
 | Desktop and Conductor prompt both fire | Desktop notification and session-visible prompt are separate surfaces |
 | Old failed notification is retried | Failed sends are allowed to retry |
 | State was changed during testing | Old pending events can surface after service or host sync is re-enabled |
+| Same PR appears bound to old sessions | Repo polling keeps only the newest confirmed active binding per PR and role; older bindings remain as inactive history |
 
 Use:
 
