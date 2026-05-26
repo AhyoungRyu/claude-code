@@ -580,6 +580,26 @@ class StateStore:
             )
         return len(rows)
 
+    def deactivate_stale_open_pr_bindings(self, repo: str, open_pr_numbers: Iterable[int]) -> int:
+        normalized = normalize_repo_full_name(repo)
+        repo_owner, repo_name = normalized.split("/", 1)
+        live_numbers = sorted({int(number) for number in open_pr_numbers})
+        params: List[Any] = [repo_owner, repo_name]
+        query = """
+            update bindings
+            set active = 0, updated_at = ?
+            where lower(repo_owner) = ? and lower(repo_name) = ?
+              and active = 1
+        """
+        if live_numbers:
+            placeholders = ", ".join("?" for _ in live_numbers)
+            query += f" and pr_number not in ({placeholders})"
+            params.extend(live_numbers)
+
+        with self.connect() as conn:
+            cursor = conn.execute(query, (utc_now(), *params))
+        return cursor.rowcount
+
     def dismiss_stale_current_pr_events(
         self,
         repo: str,

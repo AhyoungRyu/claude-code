@@ -8,8 +8,10 @@ from .conductor_adapter import (
     ConductorStatus,
     check_conductor_db,
     confirmation_activity_after_prompt,
+    explicit_pr_work_activity_after_event,
     mirror_confirmation_to_conductor,
     mirror_event_to_conductor,
+    session_prompt_defer_reason,
     visible_conductor_message_exists,
 )
 from .delivery import (
@@ -178,6 +180,16 @@ def _sync_conductor(
         if _needs_binding_confirmation(event, binding):
             assert binding is not None
             if conductor_status.available:
+                handled = _handle_event_if_session_pr_work_started(
+                    store,
+                    event,
+                    binding,
+                    conductor_status.db_path,
+                    confirm_binding=True,
+                )
+                if handled is not None:
+                    results.append(handled)
+                    continue
                 activity_evidence = confirmation_activity_after_prompt(
                     conductor_status.db_path,
                     event,
@@ -235,6 +247,19 @@ def _sync_conductor(
                                 action="confirmation_already_requested",
                                 target_id=binding.session_id,
                                 message="binding confirmation request already recorded; leaving event pending in inbox",
+                            )
+                        )
+                        continue
+                    defer_reason = session_prompt_defer_reason(conductor_status.db_path, binding)
+                    if defer_reason:
+                        _notify_conductor_session_event(store, event, notifier)
+                        results.append(
+                            HostEventResult(
+                                host="conductor",
+                                event_id=event.event_id,
+                                action="deferred_session_busy",
+                                target_id=binding.session_id,
+                                message=defer_reason,
                             )
                         )
                         continue
@@ -359,7 +384,29 @@ def _sync_conductor(
                 )
                 reported_unavailable = True
             continue
+        handled = _handle_first_event_handled_by_session_pr_work(
+            store,
+            event,
+            confirmed_bindings,
+            conductor_status.db_path,
+        )
+        if handled is not None:
+            results.append(handled)
+            continue
         for confirmed_binding in confirmed_bindings:
+            defer_reason = session_prompt_defer_reason(conductor_status.db_path, confirmed_binding)
+            if defer_reason:
+                _notify_conductor_session_event(store, event, notifier)
+                results.append(
+                    HostEventResult(
+                        host="conductor",
+                        event_id=event.event_id,
+                        action="deferred_session_busy",
+                        target_id=confirmed_binding.session_id,
+                        message=defer_reason,
+                    )
+                )
+                continue
             mirrored = mirror_event_to_conductor(conductor_status.db_path, event, confirmed_binding)
             target_id = mirrored.session_id or confirmed_binding.session_id
             if mirrored.action in {"mirrored", "already_synced"}:
@@ -381,6 +428,66 @@ def _sync_conductor(
                 )
             )
     return results
+
+
+def _handle_first_event_handled_by_session_pr_work(
+    store: StateStore,
+    event: InboxItem,
+    bindings: Iterable[Binding],
+    conductor_db_path: Optional[str | Path],
+) -> Optional[HostEventResult]:
+    for binding in bindings:
+        handled = _handle_event_if_session_pr_work_started(
+            store,
+            event,
+            binding,
+            conductor_db_path,
+            confirm_binding=False,
+        )
+        if handled is not None:
+            return handled
+    return None
+
+
+def _handle_event_if_session_pr_work_started(
+    store: StateStore,
+    event: InboxItem,
+    binding: Binding,
+    conductor_db_path: Optional[str | Path],
+    confirm_binding: bool,
+) -> Optional[HostEventResult]:
+    activity_evidence = explicit_pr_work_activity_after_event(conductor_db_path, event, binding)
+    if not activity_evidence:
+        return None
+
+    effective_binding = binding
+    if confirm_binding and not binding.confirmed:
+        effective_binding = store.confirm_binding(
+            binding.binding_id,
+            source="auto_handled_by_session_activity",
+        )
+
+    store.update_event(
+        event.event_id,
+        status="dismissed",
+        delivery_status="handled_by_session_activity",
+        binding_id=effective_binding.binding_id,
+        confidence="high",
+        evidence=event.evidence
+        + [
+            "already being handled by explicit PR work in bound Conductor session",
+            activity_evidence,
+        ],
+        recovery_command="",
+        error=activity_evidence,
+    )
+    return HostEventResult(
+        host="conductor",
+        event_id=event.event_id,
+        action="marked_handled_by_session_activity",
+        target_id=effective_binding.session_id,
+        message=activity_evidence,
+    )
 
 
 def _notify_conductor_session_event(

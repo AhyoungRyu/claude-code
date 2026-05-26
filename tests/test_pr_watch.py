@@ -2969,6 +2969,81 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("pending", store.get_event(unrelated_repo.event_id).status)
             self.assertEqual("awaiting_approval", store.get_event(unrelated_repo.event_id).delivery_status)
 
+    def test_poll_once_deactivates_active_bindings_for_prs_no_longer_open(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "author": {"login": "bang9"},
+                    "updatedAt": "2026-05-12T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            open_binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url="https://github.com/sendbird/ai-agent-js/pull/1049",
+                role="reviewer",
+                agent="codex",
+                session_id="open-session",
+                confirmed=True,
+                active=True,
+                evidence=["open PR binding"],
+            )
+            closed_confirmed = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1055,
+                pr_url="https://github.com/sendbird/ai-agent-js/pull/1055",
+                role="reviewer",
+                agent="claude",
+                session_id="closed-confirmed",
+                confirmed=True,
+                active=True,
+                evidence=["closed PR binding"],
+            )
+            closed_candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1056,
+                pr_url="https://github.com/sendbird/ai-agent-js/pull/1056",
+                role="requested_reviewer",
+                agent="codex",
+                session_id="closed-candidate",
+                confirmed=False,
+                active=True,
+                evidence=["closed candidate binding"],
+            )
+            unrelated_binding = store.create_binding(
+                repo_owner="other",
+                repo_name="repo",
+                pr_number=1055,
+                pr_url="https://github.com/other/repo/pull/1055",
+                role="reviewer",
+                agent="codex",
+                session_id="unrelated-session",
+                confirmed=True,
+                active=True,
+                evidence=["unrelated binding"],
+            )
+
+            poll_once(store, "irene", repo="sendbird/ai-agent-js", fixture=str(fixture), sessions=[])
+
+            self.assertTrue(store.get_binding(open_binding.binding_id).active)
+            self.assertFalse(store.get_binding(closed_confirmed.binding_id).active)
+            self.assertFalse(store.get_binding(closed_candidate.binding_id).active)
+            self.assertTrue(store.get_binding(unrelated_binding.binding_id).active)
+
     def test_poll_once_dismisses_stale_open_pr_events_for_mixed_case_repo_owner(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = Path(tmpdir) / "prs.json"

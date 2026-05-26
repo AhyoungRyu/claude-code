@@ -132,6 +132,24 @@ def add_conductor_session(path, session_id, claude_session_id=None, workspace_id
         )
 
 
+def add_conductor_user_message(
+    path,
+    content,
+    created_at,
+    session_id="conductor-session-1",
+    message_id="real-user-message",
+):
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            insert into session_messages (
+              id, session_id, role, content, created_at, sent_at, turn_id, queue_order
+            ) values (?, ?, 'user', ?, ?, ?, ?, 1)
+            """,
+            (message_id, session_id, content, created_at, created_at, message_id),
+        )
+
+
 class HostAdapterTests(unittest.TestCase):
     def test_conductor_status_reports_missing_and_available_db(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -642,6 +660,237 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual(2, len(rows))
             self.assertTrue(any("Suggested replies:" in row[0] for row in rows))
             self.assertTrue(any(f"pr-watch:confirm_event_id={event.event_id}" in row[0] for row in rows))
+
+    def test_host_sync_defers_conductor_confirmation_prompt_while_session_is_working(self):
+        from pr_watch.notifications import RecordingNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("update sessions set status = 'working' where id = 'conductor-session-1'")
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="rebind_candidate",
+                evidence=["new candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_rebind_confirmation",
+            )
+            notifier = RecordingNotifier()
+
+            first = sync_once(store, hosts=["conductor"], conductor_db_path=db_path, notifier=notifier)
+
+            self.assertEqual(["deferred_session_busy"], [item.action for item in first.host_results])
+            self.assertIn("working", first.host_results[0].message)
+            self.assertIsNone(
+                store.get_host_sync(event.event_id, "conductor_confirmation", candidate.session_id)
+            )
+            self.assertEqual(1, len(notifier.messages))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+                conn.execute("update sessions set status = 'idle' where id = 'conductor-session-1'")
+            self.assertEqual(0, count)
+
+            second = sync_once(store, hosts=["conductor"], conductor_db_path=db_path, notifier=notifier)
+
+            self.assertEqual(["confirmation_requested"], [item.action for item in second.host_results])
+            self.assertIsNotNone(
+                store.get_host_sync(event.event_id, "conductor_confirmation", candidate.session_id)
+            )
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(2, count)
+
+    def test_host_sync_defers_confirmed_conductor_update_while_session_is_working(self):
+        from pr_watch.notifications import RecordingNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("update sessions set status = 'working' where id = 'conductor-session-1'")
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=True,
+                active=True,
+                confirmation_source="explicit_bind",
+                evidence=["confirmed"],
+            )
+            event = make_inbox_item(store, binding_id=binding.binding_id)
+            notifier = RecordingNotifier()
+
+            first = sync_once(store, hosts=["conductor"], conductor_db_path=db_path, notifier=notifier)
+
+            self.assertEqual(["deferred_session_busy"], [item.action for item in first.host_results])
+            self.assertIsNone(store.get_host_sync(event.event_id, "conductor", binding.session_id))
+            self.assertEqual(1, len(notifier.messages))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+                conn.execute("update sessions set status = 'idle' where id = 'conductor-session-1'")
+            self.assertEqual(0, count)
+
+            second = sync_once(store, hosts=["conductor"], conductor_db_path=db_path, notifier=notifier)
+
+            self.assertEqual(["mirrored"], [item.action for item in second.host_results])
+            self.assertIsNotNone(store.get_host_sync(event.event_id, "conductor", binding.session_id))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("select count(*) from session_messages").fetchone()[0]
+            self.assertEqual(2, count)
+
+    def test_host_sync_auto_confirms_and_marks_confirmation_event_handled_when_review_started_after_event(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            candidate = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=False,
+                active=False,
+                confirmation_source="inferred_candidate",
+                evidence=["candidate"],
+            )
+            event = make_inbox_item(
+                store,
+                binding_id=candidate.binding_id,
+                status="needs_confirmation",
+                delivery_status="awaiting_first_binding_confirmation",
+            )
+            add_conductor_user_message(
+                db_path,
+                "/review-pr https://github.com/sendbird/ai-agent-js/pull/1049",
+                "2099-01-01T00:00:00Z",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["marked_handled_by_session_activity"], [item.action for item in result.host_results])
+            confirmed = store.get_binding(candidate.binding_id)
+            self.assertTrue(confirmed.confirmed)
+            self.assertTrue(confirmed.active)
+            self.assertEqual("auto_handled_by_session_activity", confirmed.confirmation_source)
+            stored = store.get_event(event.event_id)
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("handled_by_session_activity", stored.delivery_status)
+            self.assertIn("already being handled by explicit PR work in bound Conductor session", stored.evidence)
+            self.assertIsNone(store.get_host_sync(event.event_id, "conductor_confirmation", candidate.session_id))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    """
+                    select count(*) from session_messages
+                    where content like '%PR Watch:%'
+                    """
+                ).fetchone()[0]
+            self.assertEqual(0, count)
+
+    def test_host_sync_marks_confirmed_event_handled_when_review_started_after_event(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=True,
+                active=True,
+                confirmation_source="explicit_bind",
+                evidence=["confirmed"],
+            )
+            event = make_inbox_item(store, binding_id=binding.binding_id)
+            add_conductor_user_message(
+                db_path,
+                "/review-pr https://github.com/sendbird/ai-agent-js/pull/1049",
+                "2099-01-01T00:00:00Z",
+            )
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["marked_handled_by_session_activity"], [item.action for item in result.host_results])
+            stored = store.get_event(event.event_id)
+            self.assertEqual("dismissed", stored.status)
+            self.assertEqual("handled_by_session_activity", stored.delivery_status)
+            self.assertIsNone(store.get_host_sync(event.event_id, "conductor", binding.session_id))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    """
+                    select count(*) from session_messages
+                    where content like '%PR Watch:%'
+                    """
+                ).fetchone()[0]
+            self.assertEqual(0, count)
+
+    def test_host_sync_still_prompts_for_event_after_existing_review_activity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            add_conductor_user_message(
+                db_path,
+                "/review-pr https://github.com/sendbird/ai-agent-js/pull/1049",
+                "2000-01-01T00:00:00Z",
+            )
+            store = make_store(tmpdir)
+            binding = store.create_binding(
+                repo_owner="sendbird",
+                repo_name="ai-agent-js",
+                pr_number=1049,
+                pr_url=PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="conductor-session-1",
+                host="conductor",
+                confirmed=True,
+                active=True,
+                confirmation_source="explicit_bind",
+                evidence=["confirmed"],
+            )
+            event = make_inbox_item(store, binding_id=binding.binding_id)
+
+            result = sync_once(store, hosts=["conductor"], conductor_db_path=db_path)
+
+            self.assertEqual(["mirrored"], [item.action for item in result.host_results])
+            self.assertEqual("pending", store.get_event(event.event_id).status)
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    """
+                    select count(*) from session_messages
+                    where content like '%PR Watch: sendbird/ai-agent-js#1049 has an update%'
+                    """
+                ).fetchone()[0]
+            self.assertEqual(1, count)
 
     def test_host_sync_coalesces_confirmation_prompt_per_candidate_binding(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -248,6 +248,7 @@ def poll_once(
     if reconcile_repo:
         open_numbers = [number for number in (_int_or_none(pr.get("number")) for pr in prs) if number is not None]
         store.dismiss_stale_open_pr_events(reconcile_repo, open_numbers)
+        store.deactivate_stale_open_pr_bindings(reconcile_repo, open_numbers)
 
     session_list = list(sessions or [])
     routed: List[InboxItem] = []

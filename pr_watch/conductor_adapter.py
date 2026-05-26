@@ -31,6 +31,8 @@ REQUIRED_COLUMNS = {
 }
 
 PROMPT_VERSION = "2"
+BUSY_SESSION_STATUSES = {"busy", "compacting", "running", "streaming", "working"}
+NON_BUSY_TERMINAL_SESSION_STATUSES = {"", "error", "idle"}
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,89 @@ def confirmation_activity_after_prompt(
                 f"session activity after confirmation prompt referenced "
                 f"{event.repo_owner}/{event.repo_name}#{event.pr_number} at {row['created_at']}"
             )
+    return ""
+
+
+def explicit_pr_work_activity_after_event(
+    path: Optional[str | Path],
+    event: InboxItem,
+    binding: Binding,
+) -> str:
+    status = check_conductor_db(path)
+    if not status.available:
+        return ""
+    since = event.created_at or event.updated_at
+    if not since:
+        return ""
+
+    try:
+        with _connect_readonly(status.db_path) as conn:
+            session = _find_session(conn, binding.session_id)
+            if session is None:
+                return ""
+            rows = conn.execute(
+                """
+                select id, role, content, created_at, turn_id
+                from session_messages
+                where session_id = ?
+                  and role = 'user'
+                  and created_at > ?
+                order by created_at asc
+                limit 100
+                """,
+                (str(session["id"]), since),
+            ).fetchall()
+    except sqlite3.Error:
+        return ""
+
+    for row in rows:
+        content = str(row["content"] or "")
+        if _is_pr_watch_synthetic_content(content):
+            continue
+        if _is_explicit_pr_work_command(content, event):
+            return (
+                f"explicit PR work command in Conductor session referenced "
+                f"{event.repo_owner}/{event.repo_name}#{event.pr_number} at {row['created_at']}"
+            )
+    return ""
+
+
+def session_prompt_defer_reason(
+    path: Optional[str | Path],
+    binding: Binding,
+) -> str:
+    status = check_conductor_db(path)
+    if not status.available:
+        return ""
+
+    try:
+        with _connect_readonly(status.db_path) as conn:
+            session = _find_session(conn, binding.session_id)
+            if session is None:
+                return ""
+            session_status = str(session["status"] or "").strip().lower()
+            if session_status in BUSY_SESSION_STATUSES:
+                return (
+                    f"Conductor session {binding.session_id} is {session_status}; "
+                    "deferring PR Watch session prompt until the session is idle"
+                )
+            if session_status not in NON_BUSY_TERMINAL_SESSION_STATUSES:
+                return (
+                    f"Conductor session {binding.session_id} has status {session_status}; "
+                    "deferring PR Watch session prompt until the session is idle"
+                )
+            if "is_compacting" in _table_columns(conn, "sessions"):
+                compacting = conn.execute(
+                    "select is_compacting from sessions where id = ?",
+                    (str(session["id"]),),
+                ).fetchone()
+                if compacting is not None and int(compacting["is_compacting"] or 0):
+                    return (
+                        f"Conductor session {binding.session_id} is compacting; "
+                        "deferring PR Watch session prompt until the session is idle"
+                    )
+    except (sqlite3.Error, TypeError, ValueError):
+        return ""
     return ""
 
 
@@ -516,6 +601,17 @@ def _content_mentions_pr(content: str, event: InboxItem) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _is_explicit_pr_work_command(content: str, event: InboxItem) -> bool:
+    if not _content_mentions_pr(content, event):
+        return False
+    lowered = content.lower()
+    command_markers = [
+        "/review-pr",
+        "review-pr",
+    ]
+    return any(marker in lowered for marker in command_markers)
+
+
 def _connect_readonly(path: Path) -> sqlite3.Connection:
     uri = path.resolve().as_uri() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
@@ -541,9 +637,10 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _find_session(conn: sqlite3.Connection, binding_session_id: str) -> Optional[sqlite3.Row]:
+    status_expr = "status" if "status" in _table_columns(conn, "sessions") else "'' as status"
     return conn.execute(
-        """
-        select id, workspace_id
+        f"""
+        select id, workspace_id, {status_expr}
         from sessions
         where id = ? or claude_session_id = ?
         order by case when id = ? then 0 else 1 end
