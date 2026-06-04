@@ -252,7 +252,7 @@ def _sync_conductor(
                         continue
                     defer_reason = session_prompt_defer_reason(conductor_status.db_path, binding)
                     if defer_reason:
-                        _notify_conductor_session_event(store, event, notifier)
+                        _notify_deferred_conductor_session_event(store, event, notifier)
                         results.append(
                             HostEventResult(
                                 host="conductor",
@@ -396,7 +396,7 @@ def _sync_conductor(
         for confirmed_binding in confirmed_bindings:
             defer_reason = session_prompt_defer_reason(conductor_status.db_path, confirmed_binding)
             if defer_reason:
-                _notify_conductor_session_event(store, event, notifier)
+                _notify_deferred_conductor_session_event(store, event, notifier)
                 results.append(
                     HostEventResult(
                         host="conductor",
@@ -496,6 +496,20 @@ def _notify_conductor_session_event(
     notifier: Optional[object],
 ) -> None:
     notify_conductor_session_event(store, event.event_id, notifier=notifier)
+
+
+def _notify_deferred_conductor_session_event(
+    store: StateStore,
+    event: InboxItem,
+    notifier: Optional[object],
+) -> None:
+    notify_conductor_session_event(
+        store,
+        event.event_id,
+        notifier=notifier,
+        title=f"{event.repo_name} #{event.pr_number} queued for Conductor",
+        message=f"{event.summary} PR Watch will ask in Conductor when this session is idle.",
+    )
 
 
 def _confirmed_bindings_for_event(

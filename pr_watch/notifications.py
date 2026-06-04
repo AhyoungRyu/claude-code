@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import plistlib
 import shutil
 import subprocess
 import struct
@@ -18,11 +19,14 @@ APP_HOSTS = {"conductor", "codex-app", "codex_app", "mcp"}
 DESKTOP_PRIMARY_HOSTS = {"conductor"}
 CONDUCTOR_OPEN_URL = "conductor://open"
 CONDUCTOR_DESKTOP_CHANNEL = "desktop_conductor"
+PR_WATCH_NOTIFICATION_BUNDLE_ID = "com.pr-watch.notification"
 TERMINAL_NOTIFIER_INSTALL_MESSAGE = (
     "terminal-notifier is required for clickable PR Watch desktop notifications; "
     "install it with `brew install terminal-notifier`."
 )
 PR_WATCH_ICON_FILENAME = "pr-watch-notification.png"
+PR_WATCH_APP_BUNDLE_NAME = "PR Watch.app"
+PR_WATCH_APP_EXECUTABLE_NAME = "pr-watch-notification"
 HOST_ACTIVATION_BUNDLE_IDS = {
     "conductor": "com.conductor.app",
     "codex-app": "com.openai.codex",
@@ -50,6 +54,8 @@ class DesktopNotifier:
         activation_bundle_id: Optional[str] = None,
         open_url: Optional[str] = None,
         app_icon: Optional[str] = None,
+        sender_bundle_id: Optional[str] = None,
+        sender_app_path: Optional[str] = None,
     ) -> NotificationSendResult:
         if platform.system() != "Darwin":
             return NotificationSendResult(False, "desktop notifications currently use macOS osascript")
@@ -57,7 +63,9 @@ class DesktopNotifier:
         if open_url and not terminal_notifier:
             return NotificationSendResult(False, TERMINAL_NOTIFIER_INSTALL_MESSAGE)
         icon_url = app_icon or pr_watch_icon_url()
-        if terminal_notifier and (activation_bundle_id or open_url or icon_url):
+        if terminal_notifier and (sender_bundle_id or activation_bundle_id or open_url or icon_url):
+            if sender_bundle_id and sender_app_path:
+                register_app_bundle(Path(sender_app_path))
             command = [
                 terminal_notifier,
                 "-title",
@@ -67,6 +75,8 @@ class DesktopNotifier:
                 "-group",
                 event.event_id,
             ]
+            if sender_bundle_id:
+                command.extend(["-sender", sender_bundle_id])
             if icon_url:
                 command.extend(["-appIcon", icon_url])
             elif activation_bundle_id:
@@ -103,6 +113,8 @@ class RecordingNotifier:
         activation_bundle_id: Optional[str] = None,
         open_url: Optional[str] = None,
         app_icon: Optional[str] = None,
+        sender_bundle_id: Optional[str] = None,
+        sender_app_path: Optional[str] = None,
     ) -> NotificationSendResult:
         self.messages.append(
             {
@@ -112,6 +124,8 @@ class RecordingNotifier:
                 "activation_bundle_id": activation_bundle_id,
                 "open_url": open_url,
                 "app_icon": app_icon,
+                "sender_bundle_id": sender_bundle_id,
+                "sender_app_path": sender_app_path,
             }
         )
         return self.result
@@ -156,8 +170,12 @@ def notify_event(
     event = store.get_event(event_id)
     binding = store.get_binding(event.binding_id) if event.binding_id else None
     title, message = render_notification(event, binding)
-    open_url = open_url_for_event(event, binding)
-    app_icon = pr_watch_icon_url()
+    state_dir = store.path.parent
+    activation_bundle_id = activation_bundle_id_for_binding(binding) if is_conductor_binding(binding) else None
+    open_url = None if activation_bundle_id else open_url_for_event(event, binding)
+    app_icon = pr_watch_icon_url(state_dir)
+    sender_bundle_id, sender_app_path = sender_for_binding(binding, state_dir)
+    target_url = CONDUCTOR_OPEN_URL if is_conductor_binding(binding) else open_url or event.pr_url
     delivered: List[str] = []
     failures: List[str] = []
     skipped: List[str] = []
@@ -185,8 +203,11 @@ def notify_event(
             title,
             message,
             event,
+            activation_bundle_id=activation_bundle_id,
             open_url=open_url,
             app_icon=app_icon,
+            sender_bundle_id=sender_bundle_id,
+            sender_app_path=sender_app_path,
         )
         status = "sent" if result.ok else "failed"
         store.upsert_notification(
@@ -194,7 +215,7 @@ def notify_event(
             channel=actual_channel,
             title=title,
             message=message,
-            target_url=open_url or event.pr_url,
+            target_url=target_url,
             status=status,
             error=result.error,
         )
@@ -215,21 +236,29 @@ def notify_conductor_session_event(
     event_id: str,
     notifier: Optional[object] = None,
     force: bool = False,
+    title: Optional[str] = None,
+    message: Optional[str] = None,
 ) -> NotificationResult:
     event = store.get_event(event_id)
     existing = store.get_notification(event_id, CONDUCTOR_DESKTOP_CHANNEL)
     if _notification_blocks_send(existing, force):
         return NotificationResult("already_notified", event_id, channels=[CONDUCTOR_DESKTOP_CHANNEL])
 
-    title, message = render_notification(event, store.get_binding(event.binding_id))
+    default_title, default_message = render_notification(event, store.get_binding(event.binding_id))
+    title = title or default_title
+    message = message or default_message
     sender = notifier or DesktopNotifier()
-    app_icon = pr_watch_icon_url()
+    state_dir = store.path.parent
+    app_icon = pr_watch_icon_url(state_dir)
+    sender_bundle_id, sender_app_path = pr_watch_notification_sender(state_dir)
     result = sender.send(
         title,
         message,
         event,
-        open_url=CONDUCTOR_OPEN_URL,
+        activation_bundle_id=HOST_ACTIVATION_BUNDLE_IDS["conductor"],
         app_icon=app_icon,
+        sender_bundle_id=sender_bundle_id,
+        sender_app_path=sender_app_path,
     )
     status = "sent" if result.ok else "failed"
     store.upsert_notification(
@@ -283,6 +312,17 @@ def activation_bundle_id_for_binding(binding: Optional[Binding]) -> Optional[str
     return HOST_ACTIVATION_BUNDLE_IDS.get(binding.host.strip().lower())
 
 
+def sender_for_binding(binding: Optional[Binding], state_dir: Optional[Path | str] = None) -> tuple[Optional[str], Optional[str]]:
+    if not is_conductor_binding(binding):
+        return None, None
+    return pr_watch_notification_sender(state_dir)
+
+
+def pr_watch_notification_sender(state_dir: Optional[Path | str] = None) -> tuple[str, str]:
+    app_path = ensure_pr_watch_notification_app(state_dir)
+    return PR_WATCH_NOTIFICATION_BUNDLE_ID, str(app_path)
+
+
 def notification_channel_for_binding(channel: str, binding: Optional[Binding]) -> str:
     if channel == "desktop" and is_conductor_binding(binding):
         return CONDUCTOR_DESKTOP_CHANNEL
@@ -314,6 +354,57 @@ def pr_watch_icon_path(state_dir: Optional[Path | str] = None) -> Path:
     root = Path(state_dir).expanduser() if state_dir else Path.home() / ".pr-watch"
     root.mkdir(parents=True, exist_ok=True)
     return root / PR_WATCH_ICON_FILENAME
+
+
+def pr_watch_notification_app_path(state_dir: Optional[Path | str] = None) -> Path:
+    root = Path(state_dir).expanduser() if state_dir else Path.home() / ".pr-watch"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / PR_WATCH_APP_BUNDLE_NAME
+
+
+def ensure_pr_watch_notification_app(state_dir: Optional[Path | str] = None) -> Path:
+    app_path = pr_watch_notification_app_path(state_dir)
+    contents = app_path / "Contents"
+    macos = contents / "MacOS"
+    resources = contents / "Resources"
+    macos.mkdir(parents=True, exist_ok=True)
+    resources.mkdir(parents=True, exist_ok=True)
+
+    icon_source = pr_watch_icon_path(state_dir)
+    if not icon_source.exists():
+        icon_source.write_bytes(_render_pr_watch_png())
+    icon_target = resources / PR_WATCH_ICON_FILENAME
+    icon_target.write_bytes(icon_source.read_bytes())
+
+    executable = macos / PR_WATCH_APP_EXECUTABLE_NAME
+    executable.write_text('#!/bin/sh\nopen "conductor://open"\n', encoding="utf-8")
+    executable.chmod(0o755)
+
+    info = {
+        "CFBundleDisplayName": "PR Watch",
+        "CFBundleExecutable": PR_WATCH_APP_EXECUTABLE_NAME,
+        "CFBundleIdentifier": PR_WATCH_NOTIFICATION_BUNDLE_ID,
+        "CFBundleName": "PR Watch",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "LSMinimumSystemVersion": "13.0",
+    }
+    with (contents / "Info.plist").open("wb") as file:
+        plistlib.dump(info, file)
+    (contents / "PkgInfo").write_text("APPL????", encoding="ascii")
+    return app_path
+
+
+def register_app_bundle(app_path: Path) -> None:
+    if platform.system() != "Darwin":
+        return
+    lsregister = Path(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    )
+    if not lsregister.exists():
+        return
+    subprocess.run([str(lsregister), "-f", str(app_path)], capture_output=True, text=True, check=False)
 
 
 def _render_pr_watch_png(size: int = 128) -> bytes:

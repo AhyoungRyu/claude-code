@@ -21,6 +21,7 @@
 | Database | `~/.pr-watch/state.sqlite` | Inbox events, bindings, queue items, notifications, host sync records |
 | Logs | `~/.pr-watch/logs/` | launchd service output |
 | Icon | `~/.pr-watch/pr-watch-notification.png` | PR Watch desktop notification icon |
+| Notification app | `~/.pr-watch/PR Watch.app` | Local sender identity for clickable macOS notifications |
 
 Use `--state-dir` to isolate all of those paths for testing.
 

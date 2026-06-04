@@ -398,33 +398,45 @@ class StateStore:
             existing = self.find_equivalent_condition_event(event)
         dedupe_key = existing.dedupe_key if existing else event.dedupe_key
         event_id = existing.event_id if existing else random_id("evt")
-        created_at = existing.created_at if existing else now
+        resurrecting_stale = bool(existing and existing.delivery_status == "stale_pr_event_not_current")
+        created_at = existing.created_at if existing and not resurrecting_stale else now
         next_status = status
         next_delivery_status = delivery_status
         next_binding_id = binding_id
         next_confidence = confidence
         next_evidence = list(evidence)
+        next_recovery_command = ""
+        next_error = ""
         if existing and _should_preserve_delivery_state(existing):
             next_status = existing.status
             next_delivery_status = existing.delivery_status
             next_binding_id = existing.binding_id
             next_confidence = existing.confidence
             next_evidence = existing.evidence
+            next_recovery_command = existing.recovery_command
+            next_error = existing.error
         with self.connect() as conn:
             conn.execute(
                 """
                 insert into events (
                   event_id, dedupe_key, repo_owner, repo_name, pr_number, pr_url,
                   role, event_type, summary, actor, actionable, status, delivery_status,
-                  binding_id, confidence, evidence_json, payload_json, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  binding_id, confidence, evidence_json, payload_json, recovery_command, error,
+                  created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(dedupe_key) do update set
+                  summary=excluded.summary,
+                  actor=excluded.actor,
+                  actionable=excluded.actionable,
                   status=excluded.status,
                   delivery_status=excluded.delivery_status,
                   binding_id=excluded.binding_id,
                   confidence=excluded.confidence,
                   evidence_json=excluded.evidence_json,
                   payload_json=excluded.payload_json,
+                  recovery_command=excluded.recovery_command,
+                  error=excluded.error,
+                  created_at=excluded.created_at,
                   updated_at=excluded.updated_at
                 """,
                 (
@@ -445,6 +457,8 @@ class StateStore:
                     next_confidence,
                     json.dumps(next_evidence),
                     dumps(event.payload),
+                    next_recovery_command,
+                    next_error,
                     created_at,
                     now,
                 ),
@@ -974,6 +988,8 @@ def _event_from_row(row: sqlite3.Row) -> InboxItem:
 
 
 def _should_preserve_delivery_state(existing: InboxItem) -> bool:
+    if existing.delivery_status == "stale_pr_event_not_current":
+        return False
     user_decision_states = {
         "busy_needs_decision",
         "delivered",

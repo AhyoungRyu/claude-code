@@ -75,6 +75,8 @@ def enrich_pull_request_metadata(prs: List[dict], repo: str) -> None:
         number = _int_or_none(pr.get("number"))
         if number is not None:
             pr["reviewComments"] = fetch_pull_request_review_comments(repo, number)
+            if _items(pr.get("reviewRequests") or pr.get("requestedReviewers")):
+                pr["issueEvents"] = fetch_issue_events(repo, number)
     enrich_linked_issue_comments(prs, repo)
 
 
@@ -132,6 +134,51 @@ def fetch_issue_comments(repo: str, issue_number: int) -> List[dict]:
             }
         )
     return comments
+
+
+def fetch_issue_events(repo: str, issue_number: int) -> List[dict]:
+    result = subprocess.run(
+        ["gh", "api", f"repos/{repo}/issues/{issue_number}/events", "--paginate", "--slurp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    raw_pages = json.loads(result.stdout or "[]")
+    raw_events = _flatten_pages(raw_pages)
+    events = []
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(event.get("event") or "")
+        if event_name not in {"review_requested", "review_request_removed"}:
+            continue
+        actor = event.get("actor") or {}
+        if not isinstance(actor, dict):
+            actor = {}
+        requested = event.get("requested_reviewer") or event.get("requested_team") or {}
+        if not isinstance(requested, dict):
+            requested = {}
+        events.append(
+            {
+                "event": event_name,
+                "createdAt": event.get("created_at") or "",
+                "actor": {"login": actor.get("login") or actor.get("name")},
+                "requestedReviewer": {
+                    "login": requested.get("login") or requested.get("name"),
+                },
+            }
+        )
+    return events
+
+
+def _flatten_pages(value: object) -> List[dict]:
+    if isinstance(value, list):
+        if all(isinstance(item, list) for item in value):
+            return [nested for page in value for nested in page if isinstance(nested, dict)]
+        return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 def fetch_pull_request_review_comments(repo: str, pr_number: int) -> List[dict]:

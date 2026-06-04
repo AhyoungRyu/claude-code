@@ -101,7 +101,10 @@ class PrWatchTests(unittest.TestCase):
             }
         ]
 
-        with patch("pr_watch.github.fetch_pull_request_review_comments", return_value=[]):
+        with (
+            patch("pr_watch.github.fetch_pull_request_review_comments", return_value=[]),
+            patch("pr_watch.github.fetch_issue_events", return_value=[]),
+        ):
             enrich_pull_request_metadata(prs, "sendbird/ai-agent-js")
 
         self.assertEqual("2026-05-11T10:30:00Z", prs[0]["lastPushedAt"])
@@ -117,10 +120,9 @@ class PrWatchTests(unittest.TestCase):
         ]
 
         def fake_run(args, capture_output, text, check):
-            self.assertEqual(
-                ["gh", "api", "repos/sendbird/ai-agent-js/pulls/1061/comments"],
-                args,
-            )
+            if args == ["gh", "api", "repos/sendbird/ai-agent-js/issues/1061/events", "--paginate", "--slurp"]:
+                return subprocess.CompletedProcess(args, 0, stdout="[[]]", stderr="")
+            self.assertEqual(["gh", "api", "repos/sendbird/ai-agent-js/pulls/1061/comments"], args)
             return subprocess.CompletedProcess(
                 args,
                 0,
@@ -158,6 +160,68 @@ class PrWatchTests(unittest.TestCase):
                 }
             ],
             prs[0]["reviewComments"],
+        )
+
+    def test_github_polling_enriches_issue_review_request_events(self):
+        prs = [
+            {
+                "owner": "sendbird",
+                "repo": "ai-agent-js",
+                "number": 1104,
+                "reviewRequests": [{"login": "AhyoungRyu"}],
+                "commits": [],
+            }
+        ]
+
+        def fake_run(args, capture_output, text, check):
+            if args == ["gh", "api", "repos/sendbird/ai-agent-js/pulls/1104/comments"]:
+                return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
+            self.assertEqual(
+                ["gh", "api", "repos/sendbird/ai-agent-js/issues/1104/events", "--paginate", "--slurp"],
+                args,
+            )
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="""
+                [[
+                  {
+                    "event": "review_requested",
+                    "created_at": "2026-05-21T15:13:12Z",
+                    "actor": {"login": "sendbird-sdk-deployment-2"},
+                    "requested_reviewer": {"login": "AhyoungRyu"}
+                  }
+                ], [
+                  {
+                    "event": "review_requested",
+                    "created_at": "2026-05-26T16:46:40Z",
+                    "actor": {"login": "sendbird-sdk-deployment-2"},
+                    "requested_reviewer": {"login": "AhyoungRyu"}
+                  }
+                ]]
+                """,
+                stderr="",
+            )
+
+        with patch("pr_watch.github.subprocess.run", fake_run):
+            enrich_pull_request_metadata(prs, "sendbird/ai-agent-js")
+
+        self.assertEqual(
+            [
+                {
+                    "event": "review_requested",
+                    "createdAt": "2026-05-21T15:13:12Z",
+                    "actor": {"login": "sendbird-sdk-deployment-2"},
+                    "requestedReviewer": {"login": "AhyoungRyu"},
+                },
+                {
+                    "event": "review_requested",
+                    "createdAt": "2026-05-26T16:46:40Z",
+                    "actor": {"login": "sendbird-sdk-deployment-2"},
+                    "requestedReviewer": {"login": "AhyoungRyu"},
+                },
+            ],
+            prs[0]["issueEvents"],
         )
 
     def test_auto_notification_mode_uses_desktop_for_conductor_on_macos(self):
@@ -355,6 +419,54 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual(first[0].dedupe_key, second[0].dedupe_key)
         self.assertEqual("review_requested:irene", first[0].payload["condition_key"])
 
+    def test_review_requested_dedupe_changes_when_reviewer_is_requested_again(self):
+        base = {
+            "owner": "sendbird",
+            "repo": "ai-agent-js",
+            "number": 1104,
+            "url": "https://github.com/sendbird/ai-agent-js/pull/1104",
+            "title": "Improve review routing",
+            "author": {"login": "bang9"},
+            "reviewRequests": [{"login": "irene"}],
+            "issueEvents": [
+                {
+                    "event": "review_requested",
+                    "createdAt": "2026-05-21T15:13:12Z",
+                    "actor": {"login": "sendbird-sdk-deployment-2"},
+                    "requestedReviewer": {"login": "irene"},
+                }
+            ],
+            "updatedAt": "2026-05-21T15:13:12Z",
+        }
+        requested_again = dict(base)
+        requested_again["issueEvents"] = [
+            *base["issueEvents"],
+            {
+                "event": "review_requested",
+                "createdAt": "2026-05-26T16:46:40Z",
+                "actor": {"login": "sendbird-sdk-deployment-2"},
+                "requestedReviewer": {"login": "irene"},
+            },
+        ]
+        requested_again["updatedAt"] = "2026-05-26T16:46:40Z"
+
+        first = [event for event in classify_pr(base, current_user="irene") if event.event_type == "review_requested"]
+        second = [
+            event
+            for event in classify_pr(requested_again, current_user="irene")
+            if event.event_type == "review_requested"
+        ]
+
+        self.assertNotEqual(first[0].dedupe_key, second[0].dedupe_key)
+        self.assertEqual(
+            "review_requested:irene:2026-05-21T15:13:12Z",
+            first[0].payload["condition_key"],
+        )
+        self.assertEqual(
+            "review_requested:irene:2026-05-26T16:46:40Z",
+            second[0].payload["condition_key"],
+        )
+
     def test_render_notification_keeps_desktop_text_compact(self):
         from pr_watch.notifications import render_notification
 
@@ -415,7 +527,7 @@ class PrWatchTests(unittest.TestCase):
         self.assertNotIn("-sender", command)
 
     def test_desktop_notification_uses_terminal_notifier_activation_when_host_is_known(self):
-        from pr_watch.notifications import RecordingNotifier, notify_event
+        from pr_watch.notifications import PR_WATCH_NOTIFICATION_BUNDLE_ID, RecordingNotifier, notify_event
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = make_store(tmpdir)
@@ -436,8 +548,10 @@ class PrWatchTests(unittest.TestCase):
 
             self.assertEqual("notified", result.action)
             self.assertEqual(["desktop_conductor"], result.channels)
-            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
-            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
+            self.assertEqual(PR_WATCH_NOTIFICATION_BUNDLE_ID, notifier.messages[0]["sender_bundle_id"])
+            self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
+            self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
+            self.assertIsNone(notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
             self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
@@ -479,8 +593,10 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(["desktop_conductor"], result.channels)
             self.assertIn("confirm Conductor session", notifier.messages[0]["title"])
             self.assertIn("Open Conductor", notifier.messages[0]["message"])
-            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
-            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
+            self.assertEqual("com.pr-watch.notification", notifier.messages[0]["sender_bundle_id"])
+            self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
+            self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
+            self.assertIsNone(notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
             self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
@@ -529,8 +645,10 @@ class PrWatchTests(unittest.TestCase):
 
             self.assertEqual("notified", result.action)
             self.assertEqual(1, len(notifier.messages))
-            self.assertIsNone(notifier.messages[0]["activation_bundle_id"])
-            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
+            self.assertEqual("com.pr-watch.notification", notifier.messages[0]["sender_bundle_id"])
+            self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
+            self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
+            self.assertIsNone(notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             notification = store.get_notification(inbox_item.event_id, CONDUCTOR_DESKTOP_CHANNEL)
             self.assertEqual("sent", notification.status)
@@ -584,6 +702,59 @@ class PrWatchTests(unittest.TestCase):
         self.assertIn("-activate", command)
         self.assertEqual("com.conductor.app", command[command.index("-activate") + 1])
         self.assertNotIn(event.pr_url, command)
+
+    def test_desktop_notifier_uses_pr_watch_sender_icon_and_conductor_activation_when_available(self):
+        from pr_watch.notifications import DesktopNotifier
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = route_event(make_store(tmpdir), make_review_event(), sessions=[])
+            app_path = str(Path(tmpdir) / "PR Watch.app")
+            icon_url = Path(tmpdir, "pr-watch.png").as_uri()
+
+            with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
+                with patch("pr_watch.notifications.shutil.which", return_value="/opt/homebrew/bin/terminal-notifier"):
+                    with patch("pr_watch.notifications.register_app_bundle") as register:
+                        register.return_value = None
+                        with patch("pr_watch.notifications.subprocess.run") as run:
+                            run.return_value.returncode = 0
+                            run.return_value.stderr = ""
+                            run.return_value.stdout = ""
+
+                            result = DesktopNotifier().send(
+                                "ai-agent-js #1049 needs attention",
+                                "bang9 pushed new commits to PR #1049",
+                                event,
+                                sender_bundle_id="com.pr-watch.notification",
+                                sender_app_path=app_path,
+                                activation_bundle_id="com.conductor.app",
+                                app_icon=icon_url,
+                            )
+
+        command = run.call_args.args[0]
+        self.assertTrue(result.ok)
+        register.assert_called_once_with(Path(app_path))
+        self.assertIn("-sender", command)
+        self.assertEqual("com.pr-watch.notification", command[command.index("-sender") + 1])
+        self.assertIn("-appIcon", command)
+        self.assertEqual(icon_url, command[command.index("-appIcon") + 1])
+        self.assertIn("-activate", command)
+        self.assertEqual("com.conductor.app", command[command.index("-activate") + 1])
+        self.assertNotIn("-open", command)
+
+    def test_pr_watch_notification_app_bundle_contains_sender_identity(self):
+        from pr_watch.notifications import (
+            PR_WATCH_NOTIFICATION_BUNDLE_ID,
+            ensure_pr_watch_notification_app,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_path = ensure_pr_watch_notification_app(tmpdir)
+
+            info = plistlib.loads((app_path / "Contents" / "Info.plist").read_bytes())
+            self.assertTrue((app_path / "Contents" / "MacOS" / "pr-watch-notification").exists())
+
+        self.assertEqual("PR Watch", info["CFBundleDisplayName"])
+        self.assertEqual(PR_WATCH_NOTIFICATION_BUNDLE_ID, info["CFBundleIdentifier"])
 
     def test_desktop_notifier_uses_pr_watch_icon_and_conductor_open_url_when_available(self):
         from pr_watch.notifications import DesktopNotifier
@@ -2376,6 +2547,107 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("awaiting_rebind_confirmation", rerouted.delivery_status)
             self.assertEqual(candidate.binding_id, rerouted.binding_id)
 
+    def test_rebind_does_not_choose_session_focused_on_another_pr_from_incidental_mention(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            active_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="author",
+                agent="codex",
+                session_id="codex-pr-1049",
+            )
+            event = ClassifiedEvent(
+                pr=PullRequestRef(
+                    owner="sendbird",
+                    repo="ai-agent-js",
+                    number=1049,
+                    url=PR_URL,
+                    title="Improve the tool runner",
+                    head_ref="Scope-AI-Stats-Phase-2",
+                ),
+                role="author",
+                event_type="merge_conflict",
+                summary="PR #1049 has a merge conflict.",
+                actor="github",
+                actionable=True,
+                dedupe_key="test:1049:merge-conflict",
+                payload={"condition_key": "merge_conflict:dirty"},
+            )
+            pr_1104_session = SessionInfo(
+                agent="codex",
+                session_id="codex-pr-1104",
+                title="Check PR updates",
+                cwd="/repo/ai-agent-js",
+                branch="feat/review-pr-1101",
+                text=(
+                    "/review-pr 1104 PR body 에 있는 내용을 최대한 참고해주세요.\n"
+                    "Posted comments on https://github.com/sendbird/ai-agent-js/pull/1104.\n"
+                    "gh api repos/sendbird/ai-agent-js/pulls/1104/comments --paginate\n"
+                    "This PR mentions PR #1049 only as an example of a large review history.\n"
+                    "Open PR list also includes #1104 and #1049."
+                ),
+                host="conductor",
+                last_activity_at="2026-05-26T09:47:10Z",
+            )
+
+            inbox_item = route_event(store, event, sessions=[pr_1104_session])
+
+            self.assertEqual("pending", inbox_item.status)
+            self.assertEqual("awaiting_approval", inbox_item.delivery_status)
+            self.assertEqual(active_binding.binding_id, inbox_item.binding_id)
+            self.assertEqual(["codex-pr-1049"], [binding.session_id for binding in store.list_confirmed_bindings(event)])
+
+    def test_current_event_resurrects_after_stale_dismissal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            active_binding = create_explicit_binding(
+                store,
+                PR_URL,
+                role="author",
+                agent="codex",
+                session_id="codex-pr-1049",
+            )
+            event = ClassifiedEvent(
+                pr=PullRequestRef(
+                    owner="sendbird",
+                    repo="ai-agent-js",
+                    number=1049,
+                    url=PR_URL,
+                    title="Improve the tool runner",
+                    head_ref="Scope-AI-Stats-Phase-2",
+                ),
+                role="author",
+                event_type="merge_conflict",
+                summary="PR #1049 has a merge conflict.",
+                actor="github",
+                actionable=True,
+                dedupe_key="test:1049:merge-conflict-current-again",
+                payload={"condition_key": "merge_conflict:dirty"},
+            )
+            first = route_event(store, event, sessions=[])
+            store.update_event(
+                first.event_id,
+                status="dismissed",
+                delivery_status="stale_pr_event_not_current",
+                recovery_command="",
+                error="Event is no longer present in the current actionable PR state.",
+            )
+            with store.connect() as conn:
+                conn.execute(
+                    "update events set created_at = ? where event_id = ?",
+                    ("2026-05-18T00:00:00Z", first.event_id),
+                )
+
+            rerouted = route_event(store, event, sessions=[])
+
+            self.assertEqual(first.event_id, rerouted.event_id)
+            self.assertEqual("pending", rerouted.status)
+            self.assertEqual("awaiting_approval", rerouted.delivery_status)
+            self.assertEqual(active_binding.binding_id, rerouted.binding_id)
+            self.assertNotEqual("2026-05-18T00:00:00Z", rerouted.created_at)
+            self.assertEqual("", rerouted.error)
+
     def test_confirmed_rebind_becomes_primary_for_future_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from pr_watch.workflow import confirm_binding_for_event
@@ -3519,6 +3791,71 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(["author_push_after_review"], updates["notify_event_types"])
             self.assertEqual([], notifications["notifications"])
 
+    def test_mcp_watch_current_repo_adds_detected_git_remote(self):
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as repo_dir:
+            from pr_watch.mcp_server import list_watched_repos, watch_current_repo
+
+            subprocess.run(["git", "init"], cwd=repo_dir, capture_output=True, text=True, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "git@github.com:Sendbird/Chat-JS.git"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            result = watch_current_repo(cwd=repo_dir, state_dir=tmpdir)
+            watched = list_watched_repos(state_dir=tmpdir)
+
+            self.assertEqual("watched", result["status"])
+            self.assertEqual("sendbird/chat-js", result["repo"])
+            self.assertEqual(["sendbird/chat-js"], watched["repositories"])
+
+    def test_mcp_doctor_reports_current_repo_watch_status_and_hint(self):
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as repo_dir:
+            from pr_watch.mcp_server import doctor, watch_current_repo
+
+            subprocess.run(["git", "init"], cwd=repo_dir, capture_output=True, text=True, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/sendbird/sendbird-chat-sdk-tour.git"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            before = doctor(state_dir=tmpdir, cwd=repo_dir)
+            watch_current_repo(cwd=repo_dir, state_dir=tmpdir)
+            after = doctor(state_dir=tmpdir, cwd=repo_dir)
+
+            self.assertEqual("sendbird/sendbird-chat-sdk-tour", before["current_repo"])
+            self.assertFalse(before["current_repo_watched"])
+            self.assertIn("watch_current_repo", before["watch_hint"])
+            self.assertEqual(["sendbird/sendbird-chat-sdk-tour"], after["watched_repositories"])
+            self.assertTrue(after["current_repo_watched"])
+            self.assertEqual("", after["watch_hint"])
+
+    def test_mcp_check_pr_updates_includes_watch_status_for_current_repo(self):
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as repo_dir:
+            from pr_watch.mcp_server import check_pr_updates
+
+            subprocess.run(["git", "init"], cwd=repo_dir, capture_output=True, text=True, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "git@github.com:sendbird/sendbird-chat-sdk-tour.git"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text("[]", encoding="utf-8")
+
+            updates = check_pr_updates(fixture=str(fixture), user="irene", cwd=repo_dir, state_dir=tmpdir)
+
+            self.assertEqual("sendbird/sendbird-chat-sdk-tour", updates["watch"]["current_repo"])
+            self.assertFalse(updates["watch"]["current_repo_watched"])
+            self.assertIn("watch_current_repo", updates["watch"]["hint"])
+
     def test_cli_init_profiles_set_host_appropriate_notification_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with redirect_stdout(StringIO()):
@@ -3672,6 +4009,9 @@ class PrWatchTests(unittest.TestCase):
             self.assertIn("codex-app", text)
             self.assertIn("conductor", text)
             self.assertIn("/opt/pr-watch/bin/python -m pr_watch --state-dir", text)
+            self.assertIn("MCP registration does not automatically watch repositories.", text)
+            self.assertIn("pr-watch setup --current-repo", text)
+            self.assertIn("pr-watch watch add owner/name", text)
 
     def test_watch_repo_state_and_cli_manage_repositories(self):
         with tempfile.TemporaryDirectory() as tmpdir:

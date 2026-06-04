@@ -39,6 +39,13 @@ pr-watch-mcp
 
 `install-mcp` only registers tools. It does not add repositories to the watch allowlist and it does not install the background service.
 
+After registration, add repositories explicitly. From a host session in the repo, ask PR Watch to use `watch_current_repo`. From a terminal, run:
+
+```bash
+pr-watch setup --current-repo
+pr-watch watch add owner/name
+```
+
 ## Usage Examples
 
 Ask a host session:
@@ -64,6 +71,26 @@ Review pending actions:
 ```json
 {
   "tool": "show_pending_pr_actions",
+  "arguments": {}
+}
+```
+
+Watch the current repository from an MCP host session:
+
+```json
+{
+  "tool": "watch_current_repo",
+  "arguments": {
+    "cwd": "/path/to/repo"
+  }
+}
+```
+
+Check watch coverage:
+
+```json
+{
+  "tool": "list_watched_repos",
   "arguments": {}
 }
 ```
@@ -158,4 +185,7 @@ Show and acknowledge in-app notifications:
 | `show_in_app_notifications` | Show app-hosted notification inbox items |
 | `ack_notification` | Mark an in-app notification as read |
 | `bind_pr` | Explicitly bind a PR to a Claude or Codex session |
-| `doctor` | Report dependency, config, and auth status |
+| `list_watched_repos` | List repositories polled by the background service |
+| `watch_repo` | Add an explicit `owner/name` repository to background polling |
+| `watch_current_repo` | Detect the GitHub remote for the current working directory and watch it |
+| `doctor` | Report dependency, config, auth, and watch allowlist status |

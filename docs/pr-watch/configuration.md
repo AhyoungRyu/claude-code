@@ -46,7 +46,7 @@ pr-watch config set notify_event_types '["author_push_after_review", "review_req
 | `both` | Sends desktop and in-app notifications |
 | `browser` | Legacy alias for `in_app` |
 
-The `desktop` channel uses `terminal-notifier` when available. Clickable PR Watch notifications use the generated PR Watch icon and open either `conductor://open` for Conductor-bound events or the GitHub PR URL for other events. The `osascript` fallback is non-clickable.
+The `desktop` channel uses `terminal-notifier` when available. Clickable PR Watch notifications use the generated PR Watch icon. Conductor-bound events focus the Conductor app; other events open the GitHub PR URL. Conductor-bound notifications are sent with the local `PR Watch.app` sender identity so they appear as PR Watch notifications, not as generic terminal notifications. The `osascript` fallback is non-clickable.
 
 ## Notification Event Types
 

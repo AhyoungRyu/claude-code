@@ -318,15 +318,23 @@ def _reviewer_events(
     requested = [_login(item) for item in _items(pr_data.get("reviewRequests") or pr_data.get("requestedReviewers"))]
     if current_user in requested:
         requested_key = ",".join(sorted({login for login in requested if login}))
+        review_request_event = _latest_review_requested_event(pr_data, current_user)
+        requested_at = str(review_request_event.get("createdAt") or review_request_event.get("created_at") or "")
         condition_key = f"review_requested:{requested_key}"
+        if requested_at:
+            condition_key = f"{condition_key}:{requested_at}"
         yield _event(
             pr,
             role="requested_reviewer",
             event_type="review_requested",
-            actor=author or "author",
+            actor=_login(review_request_event.get("actor")) or author or "author",
             occurred_at=condition_key,
             summary=f"You were requested to review PR #{pr.number}.",
-            payload={"requested_reviewers": requested, "condition_key": condition_key},
+            payload={
+                "requested_reviewers": requested,
+                "condition_key": condition_key,
+                "requested_at": requested_at,
+            },
         )
 
 
@@ -497,6 +505,18 @@ def _login(value: Any) -> str:
     if isinstance(value, str):
         return value
     return ""
+
+
+def _latest_review_requested_event(pr_data: Dict[str, Any], login: str) -> Dict[str, Any]:
+    events = [
+        event
+        for event in _items(pr_data.get("issueEvents") or pr_data.get("timelineEvents"))
+        if str(event.get("event") or "") == "review_requested"
+        and _login(event.get("requestedReviewer") or event.get("requested_reviewer")) == login
+    ]
+    if not events:
+        return {}
+    return sorted(events, key=lambda item: str(item.get("createdAt") or item.get("created_at") or ""))[-1]
 
 
 def _latest_by_user(items: List[Dict[str, Any]], login: str) -> Optional[Dict[str, Any]]:

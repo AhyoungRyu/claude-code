@@ -723,7 +723,10 @@ def score_session(pr: PullRequestRef, session: SessionInfo) -> Tuple[str, List[s
     exact_pr = any("PR URL" in item or f"PR #{pr.number}" in item for item in evidence)
     repo_match = any("repo" in item or "cwd" in item for item in evidence)
     branch_match = any("branch" in item for item in evidence)
+    other_focused_prs = sorted(number for number in focused_pr_numbers(session) if number != pr.number)
 
+    if other_focused_prs and not focus_evidence:
+        return "none", []
     if looks_like_pr_listing_session(pr, session) and not focus_evidence:
         return ("low", evidence) if repo_match else ("none", [])
     if exact_pr and repo_match:
@@ -741,12 +744,37 @@ def session_focus_score(pr: PullRequestRef, session: SessionInfo) -> int:
     return len(pr_focused_session_evidence(pr, session))
 
 
+def focused_pr_numbers(session: SessionInfo) -> set[int]:
+    title = session.title.lower()
+    haystack = " ".join([session.title, session.branch, session.text]).lower()
+    numbers: set[int] = set()
+    patterns = [
+        (title, r"\b(?:review|fix|check|handle|resume)\s+(?:pr\s*)?#?(\d{1,7})\b"),
+        (haystack, r"/(?:review-pr|gh-address-comments)\s+(?:https://github\.com/[^/\s]+/[^/\s]+/pull/)?#?(\d{1,7})\b"),
+        (haystack, r"\b(?:origin/)?pr[-/](\d{1,7})\b"),
+        (haystack, r"pull/(\d{1,7})#discussion_r"),
+        (haystack, r"/pulls/(\d{1,7})/comments"),
+    ]
+    for text, pattern in patterns:
+        for match in re.finditer(pattern, text):
+            try:
+                numbers.add(int(match.group(1)))
+            except ValueError:
+                continue
+    return numbers
+
+
 def pr_focused_session_evidence(pr: PullRequestRef, session: SessionInfo) -> List[str]:
     title = session.title.lower()
     haystack = " ".join([session.title, session.branch, session.text]).lower()
     evidence: List[str] = []
     if re.search(rf"\b(?:review|fix|check|handle|resume)\s+(?:pr\s*)?#?{pr.number}\b", title):
         evidence.append(f"session title is focused on PR #{pr.number}")
+    if re.search(
+        rf"/(?:review-pr|gh-address-comments)\s+(?:https://github\.com/[^/\s]+/[^/\s]+/pull/)?#?{pr.number}\b",
+        haystack,
+    ):
+        evidence.append(f"session work command is focused on PR #{pr.number}")
     if re.search(rf"\b(?:origin/)?pr[-/]{pr.number}\b", haystack):
         evidence.append(f"session work references PR branch {pr.number}")
     if f"pull/{pr.number}#discussion_r" in haystack:

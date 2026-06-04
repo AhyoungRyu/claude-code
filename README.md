@@ -82,6 +82,7 @@ More setup paths: [setup guide](./docs/pr-watch/setup.md).
 | `--state-dir /path/to/state` | Isolated local state | Uses a separate DB/config for testing or private setups |
 
 In practice: MCP registration is user-level, but background PR polling is limited to repositories you explicitly add with `setup` or `watch add`.
+From an MCP host session, use `watch_current_repo` to add the current GitHub repo without leaving the chat.
 
 ## Core Config
 
@@ -126,6 +127,7 @@ Supported events and tuning examples: [configuration](./docs/pr-watch/configurat
 | Add current repo to background polling | `pr-watch setup --current-repo --install-service` |
 | Add a specific repo | `pr-watch setup --repo owner/name --install-service` |
 | Add repo without touching service | `pr-watch watch add owner/name` |
+| Add current repo from MCP | `watch_current_repo` |
 | List watched repos | `pr-watch watch list` |
 | Poll once | `pr-watch daemon --once --repo owner/name` |
 | Show inbox | `pr-watch inbox` |

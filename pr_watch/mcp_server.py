@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .config import config_bool, config_list, load_config, state_db_path
@@ -12,7 +13,9 @@ from .host_adapter import status as host_bridge_status
 from .host_adapter import sync_once as host_bridge_sync_once
 from .notifications import notify_event, resolve_notification_mode
 from .sessions import discover_sessions
+from .setup import detect_current_repo
 from .state import StateStore
+from .util import normalize_repo_full_name
 from .workflow import (
     confirm_binding_and_mark_handled as workflow_confirm_binding_and_mark_handled,
     confirm_binding_for_event as workflow_confirm_binding_for_event,
@@ -30,6 +33,7 @@ def poll_once(
     fixture: Optional[str] = None,
     user: Optional[str] = None,
     state_dir: Optional[str] = None,
+    cwd: Optional[str] = None,
     include_drafts: Optional[bool] = None,
     notification_mode: Optional[str] = None,
     notify_event_types: Optional[list[str]] = None,
@@ -47,10 +51,12 @@ def poll_once(
         else config_list(config, "notify_event_types", default=["*"])
     )
     store = StateStore(state_db_path(state_dir))
+    watch = _watch_status(store, cwd=cwd, repo=repo)
+    poll_repo = repo or (watch["current_repo"] if not fixture else None)
     items = github_poll_once(
         store,
         user or current_user(),
-        repo=repo,
+        repo=poll_repo,
         fixture=fixture,
         sessions=discover_sessions(),
         include_drafts=should_include_drafts,
@@ -65,6 +71,7 @@ def poll_once(
         "notification_mode": selected_notification_mode,
         "notify_event_types": selected_notify_event_types,
         "resolved_notification_mode": resolve_notification_mode(selected_notification_mode, host="mcp"),
+        "watch": watch,
         "events": [_to_json(item) for item in items],
         "notifications": [
             _to_json(item)
@@ -291,6 +298,7 @@ def check_pr_updates(
     fixture: Optional[str] = None,
     user: Optional[str] = None,
     state_dir: Optional[str] = None,
+    cwd: Optional[str] = None,
     include_drafts: Optional[bool] = None,
     notification_mode: Optional[str] = None,
     notify_event_types: Optional[list[str]] = None,
@@ -301,6 +309,7 @@ def check_pr_updates(
         fixture=fixture,
         user=user,
         state_dir=state_dir,
+        cwd=cwd,
         include_drafts=include_drafts,
         notification_mode=notification_mode,
         notify_event_types=notify_event_types,
@@ -337,10 +346,51 @@ def sync_host_once(
     return _to_json(result)
 
 
-def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
+def list_watched_repos(state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """List repositories polled by the background PR Watch service."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    return {"repositories": store.list_watch_repos()}
+
+
+def watch_repo(repo: str, state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Add one repository to the background polling allowlist."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    watched_repo = store.add_watch_repo(repo)
+    return {
+        "status": "watched",
+        "repo": watched_repo,
+        "repositories": store.list_watch_repos(),
+    }
+
+
+def watch_current_repo(cwd: Optional[str] = None, state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Detect the current GitHub repository from git remote and watch it."""
+    state_dir = _effective_state_dir(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    repo = _detect_current_repo(cwd)
+    if repo is None:
+        return {
+            "status": "not_detected",
+            "repo": None,
+            "repositories": store.list_watch_repos(),
+            "message": "No GitHub origin remote was detected. Pass repo to watch_repo instead.",
+        }
+    watched_repo = store.add_watch_repo(repo)
+    return {
+        "status": "watched",
+        "repo": watched_repo,
+        "repositories": store.list_watch_repos(),
+    }
+
+
+def doctor(state_dir: Optional[str] = None, cwd: Optional[str] = None) -> Dict[str, Any]:
     """Return local dependency and configuration diagnostics."""
     state_dir = _effective_state_dir(state_dir)
     config = load_config(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    watch = _watch_status(store, cwd=cwd)
     gh_auth = None
     if shutil.which("gh"):
         result = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, check=False)
@@ -351,6 +401,10 @@ def doctor(state_dir: Optional[str] = None) -> Dict[str, Any]:
         "include_drafts": config.get("include_drafts"),
         "notification_mode": config.get("notification_mode"),
         "notify_event_types": config_list(config, "notify_event_types", default=["*"]),
+        "watched_repositories": watch["repositories"],
+        "current_repo": watch["current_repo"],
+        "current_repo_watched": watch["current_repo_watched"],
+        "watch_hint": watch["hint"],
         "executables": {name: shutil.which(name) for name in ["gh", "claude", "codex", "osascript", "terminal-notifier"]},
         "gh_auth": gh_auth,
         "conductor": "optional, not required",
@@ -381,6 +435,9 @@ def build_server() -> Any:
     server.tool()(ack_notification)
     server.tool()(host_status)
     server.tool()(sync_host_once)
+    server.tool()(list_watched_repos)
+    server.tool()(watch_repo)
+    server.tool()(watch_current_repo)
     server.tool()(doctor)
     return server
 
@@ -393,6 +450,31 @@ def run_server(state_dir: Optional[str] = None) -> None:
 
 def _effective_state_dir(state_dir: Optional[str]) -> Optional[str]:
     return state_dir or _DEFAULT_STATE_DIR
+
+
+def _detect_current_repo(cwd: Optional[str]) -> Optional[str]:
+    try:
+        return detect_current_repo(Path(cwd).expanduser() if cwd else Path.cwd())
+    except ValueError:
+        return None
+
+
+def _watch_status(store: StateStore, cwd: Optional[str] = None, repo: Optional[str] = None) -> Dict[str, Any]:
+    repositories = store.list_watch_repos()
+    current_repo = normalize_repo_full_name(repo) if repo else _detect_current_repo(cwd)
+    current_repo_watched = current_repo in repositories if current_repo else None
+    hint = ""
+    if current_repo and not current_repo_watched:
+        hint = (
+            "This repository is not in the background watch allowlist. "
+            "Call watch_current_repo(cwd=...) or run `pr-watch setup --current-repo`."
+        )
+    return {
+        "repositories": repositories,
+        "current_repo": current_repo,
+        "current_repo_watched": current_repo_watched,
+        "hint": hint,
+    }
 
 
 def _to_json(value: Any) -> Any:

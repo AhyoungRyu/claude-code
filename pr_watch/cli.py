@@ -254,6 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"{host.host}: {host.binary}")
                     print("  check:", " ".join(build_codex_mcp_get_command(host.binary)))
                     print("  add:", " ".join(build_codex_mcp_add_command(host.binary, launch)))
+                print_mcp_watch_guidance()
                 return 0
             results = install_mcp_hosts(
                 target=args.target,
@@ -274,6 +275,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if result.message:
                     print(f"  {result.message}")
                 failed = failed or result.status == "failed"
+            if not failed:
+                print_mcp_watch_guidance()
             return 1 if failed else 0
         if args.command == "doctor":
             return doctor(args.state_dir)
@@ -856,11 +859,24 @@ def current_branch() -> str:
 
 def doctor(state_dir: Optional[str]) -> int:
     config = load_config(state_dir)
+    store = StateStore(state_db_path(state_dir))
+    watched_repositories = store.list_watch_repos()
     print(f"state: {state_db_path(state_dir)}")
     print(f"busy_policy: {config.get('busy_policy')}")
     print(f"include_drafts: {config.get('include_drafts')}")
     print(f"notification_mode: {config.get('notification_mode')}")
     print(f"notify_event_types: {', '.join(config_list(config, 'notify_event_types', default=['*']))}")
+    print(f"watched_repositories: {', '.join(watched_repositories) if watched_repositories else '(none)'}")
+    try:
+        current_repo = detect_current_repo(Path.cwd())
+    except ValueError:
+        current_repo = None
+    if current_repo:
+        watched = current_repo in watched_repositories
+        print(f"current_repo: {current_repo}")
+        print(f"current_repo_watched: {str(watched).lower()}")
+        if not watched:
+            print("watch_hint: run `pr-watch setup --current-repo` or use MCP tool `watch_current_repo`")
     for executable in ["gh", "claude", "codex", "osascript", "terminal-notifier"]:
         path = shutil.which(executable)
         print(f"{executable}: {path or 'not found'}")
@@ -869,3 +885,12 @@ def doctor(state_dir: Optional[str]) -> int:
         print(f"gh auth: {'ok' if result.returncode == 0 else 'not authenticated'}")
     print("conductor: optional, not required")
     return 0
+
+
+def print_mcp_watch_guidance() -> None:
+    print("")
+    print("MCP registration does not automatically watch repositories.")
+    print("Add repositories to the background polling allowlist when you want PR updates:")
+    print("  current repo: pr-watch setup --current-repo")
+    print("  explicit repo: pr-watch watch add owner/name")
+    print("From MCP, use `watch_current_repo` or `watch_repo`.")

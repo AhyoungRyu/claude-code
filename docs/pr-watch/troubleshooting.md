@@ -41,7 +41,7 @@ For clickable PR Watch notifications with the PR Watch icon:
 brew install terminal-notifier
 ```
 
-Then send or wait for a new notification. Conductor-bound desktop notifications should open `conductor://open`; other events open the GitHub PR URL.
+Then send or wait for a new notification. Conductor-bound desktop notifications should appear under `PR Watch` in Notification Center and focus the Conductor app; other events open the GitHub PR URL.
 
 ## Duplicate Notifications
 
