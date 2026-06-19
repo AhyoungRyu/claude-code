@@ -13,8 +13,8 @@ from typing import Iterable, List, Optional
 from .config import config_bool, config_list, default_state_dir, load_config, set_config_value, state_db_path
 from .github import current_user, poll_once
 from .host_adapter import sync_once as host_sync_once
-from .models import SessionInfo
-from .notifications import normalize_notification_mode
+from .models import InboxItem, SessionInfo
+from .notifications import normalize_notification_mode, notify_events
 from .sessions import discover_sessions
 from .state import StateStore
 
@@ -318,6 +318,7 @@ def _run_service_once_locked(
     started = time.monotonic()
     repo_results: List[RepoRunResult] = []
     event_count = 0
+    routed_for_notification: list[InboxItem] = []
 
     for repo in repos:
         if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
@@ -331,7 +332,7 @@ def _run_service_once_locked(
                 fixture=fixture,
                 sessions=session_list,
                 include_drafts=should_include_drafts,
-                notification_mode=mode,
+                notification_mode="none" if host_sync else mode,
                 notification_host=notification_host,
                 notify_event_types=notify_event_types,
             )
@@ -339,6 +340,7 @@ def _run_service_once_locked(
             repo_results.append(RepoRunResult(repo, "failed", message=str(exc)))
             continue
         event_count += len(items)
+        routed_for_notification.extend(items)
         repo_results.append(RepoRunResult(repo, "completed", event_count=len(items)))
 
     host_message = ""
@@ -364,6 +366,13 @@ def _run_service_once_locked(
             len(sync_result.trigger_results),
             len(sync_result.notify_prompt_results),
         )
+        notify_events(
+            store,
+            _reload_notifiable_events(store, routed_for_notification),
+            mode=mode,
+            host=notification_host,
+            notify_event_types=notify_event_types,
+        )
 
     if any(item.status == "failed" for item in repo_results):
         status = "completed_with_errors"
@@ -374,6 +383,16 @@ def _run_service_once_locked(
     else:
         status = "completed"
     return ServiceRunResult(status, event_count=event_count, repo_results=repo_results, message=host_message)
+
+
+def _reload_notifiable_events(store: StateStore, events: Iterable[InboxItem]) -> list[InboxItem]:
+    notifiable: list[InboxItem] = []
+    for event in events:
+        latest = store.get_event(event.event_id)
+        if latest.status == "dismissed":
+            continue
+        notifiable.append(latest)
+    return notifiable
 
 
 def _host_sync_message(host_results: list[object], trigger_count: int, notify_prompt_count: int = 0) -> str:

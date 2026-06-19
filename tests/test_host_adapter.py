@@ -1914,6 +1914,74 @@ class HostAdapterTests(unittest.TestCase):
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
             self.assertEqual(2, count)
 
+    def test_service_run_once_syncs_conductor_before_notifying_stale_confirmation(self):
+        from pr_watch.models import SessionInfo
+        from pr_watch.service import run_service_once
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "conductor.sqlite"
+            create_conductor_db(db_path)
+            add_conductor_user_message(
+                db_path,
+                "/review-pr https://github.com/sendbird/ai-agent-js/pull/1049",
+                "2099-01-01T00:00:00Z",
+            )
+            fixture = Path(tmpdir) / "prs.json"
+            fixture.write_text(
+                """
+                [
+                  {
+                    "owner": "sendbird",
+                    "repo": "ai-agent-js",
+                    "number": 1049,
+                    "url": "https://github.com/sendbird/ai-agent-js/pull/1049",
+                    "author": {"login": "bang9"},
+                    "reviewRequests": [{"login": "irene"}],
+                    "issueEvents": [
+                      {
+                        "event": "review_requested",
+                        "created_at": "2026-05-11T09:00:00Z",
+                        "actor": {"login": "bang9"},
+                        "requested_reviewer": {"login": "irene"}
+                      }
+                    ],
+                    "updatedAt": "2026-05-11T10:00:00Z"
+                  }
+                ]
+                """,
+                encoding="utf-8",
+            )
+            store = make_store(tmpdir)
+            store.add_watch_repo("sendbird/ai-agent-js")
+            session = SessionInfo(
+                agent="codex",
+                session_id="conductor-session-1",
+                title="Re-review PR",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                text="/review-pr https://github.com/sendbird/ai-agent-js/pull/1049",
+                host="conductor",
+                last_activity_at="2026-05-11T10:00:00Z",
+            )
+
+            result = run_service_once(
+                state_dir=tmpdir,
+                current_user_login="irene",
+                fixture=str(fixture),
+                notification_mode="in_app",
+                sessions=[session],
+                host_sync=True,
+                host="conductor",
+                conductor_db_path=db_path,
+            )
+
+            events = store.list_events(include_done=True)
+            self.assertEqual("completed", result.status)
+            self.assertEqual(1, len(events))
+            self.assertEqual("dismissed", events[0].status)
+            self.assertEqual("handled_by_session_activity", events[0].delivery_status)
+            self.assertEqual([], store.list_notifications(include_done=True))
+
 
 if __name__ == "__main__":
     unittest.main()
