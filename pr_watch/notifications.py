@@ -171,7 +171,7 @@ def notify_event(
     binding = store.get_binding(event.binding_id) if event.binding_id else None
     title, message = render_notification(event, binding)
     state_dir = store.path.parent
-    activation_bundle_id = activation_bundle_id_for_binding(binding) if is_conductor_binding(binding) else None
+    activation_bundle_id = activation_bundle_id_for_binding(binding)
     open_url = open_url_for_event(event, binding)
     app_icon = pr_watch_icon_url(state_dir)
     sender_bundle_id, sender_app_path = sender_for_binding(binding, state_dir)
@@ -336,8 +336,13 @@ def open_url_for_binding(binding: Optional[Binding]) -> Optional[str]:
     return None
 
 
-def open_url_for_event(event: InboxItem, binding: Optional[Binding]) -> str:
-    return open_url_for_binding(binding) or event.pr_url
+def open_url_for_event(event: InboxItem, binding: Optional[Binding]) -> Optional[str]:
+    binding_open_url = open_url_for_binding(binding)
+    if binding_open_url:
+        return binding_open_url
+    if activation_bundle_id_for_binding(binding):
+        return None
+    return event.pr_url
 
 
 def is_conductor_binding(binding: Optional[Binding]) -> bool:

@@ -556,6 +556,33 @@ class PrWatchTests(unittest.TestCase):
             self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
             self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
 
+    def test_desktop_notification_activates_codex_app_when_host_is_known(self):
+        from pr_watch.notifications import RecordingNotifier, notify_event
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = make_store(tmpdir)
+            create_explicit_binding(
+                store,
+                PR_URL,
+                role="reviewer",
+                agent="codex",
+                session_id="codex-abc",
+                cwd="/repo/ai-agent-js",
+                branch="review/pr-1049",
+                host="codex-app",
+            )
+            inbox_item = route_event(store, make_review_event("codex-app-activation"), sessions=[])
+            notifier = RecordingNotifier()
+
+            result = notify_event(store, inbox_item.event_id, mode="desktop", notifier=notifier)
+
+            self.assertEqual("notified", result.action)
+            self.assertEqual(["desktop"], result.channels)
+            self.assertEqual("com.openai.codex", notifier.messages[0]["activation_bundle_id"])
+            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertIsNone(notifier.messages[0]["sender_bundle_id"])
+            self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
+
     def test_desktop_notification_for_conductor_confirmation_explains_session_prompt(self):
         from pr_watch.notifications import RecordingNotifier, notify_event
 
