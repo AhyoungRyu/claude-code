@@ -779,10 +779,52 @@ class PrWatchTests(unittest.TestCase):
             app_path = ensure_pr_watch_notification_app(tmpdir)
 
             info = plistlib.loads((app_path / "Contents" / "Info.plist").read_bytes())
-            self.assertTrue((app_path / "Contents" / "MacOS" / "pr-watch-notification").exists())
+            executable = app_path / "Contents" / "MacOS" / info["CFBundleExecutable"]
+            self.assertTrue(executable.exists())
 
         self.assertEqual("PR Watch", info["CFBundleDisplayName"])
         self.assertEqual(PR_WATCH_NOTIFICATION_BUNDLE_ID, info["CFBundleIdentifier"])
+
+    def test_pr_watch_notification_app_uses_launchable_applescript_when_available(self):
+        from pr_watch.notifications import (
+            PR_WATCH_NOTIFICATION_BUNDLE_ID,
+            ensure_pr_watch_notification_app,
+        )
+
+        def fake_osacompile(command, capture_output, text, check):
+            app_path = Path(command[-1])
+            contents = app_path / "Contents"
+            macos = contents / "MacOS"
+            macos.mkdir(parents=True)
+            (macos / "applet").write_bytes(b"compiled applet")
+            with (contents / "Info.plist").open("wb") as file:
+                plistlib.dump(
+                    {
+                        "CFBundleExecutable": "applet",
+                        "CFBundleName": "Applet",
+                        "CFBundlePackageType": "APPL",
+                    },
+                    file,
+                )
+            result = subprocess.CompletedProcess(command, 0, "", "")
+            return result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("pr_watch.notifications.platform.system", return_value="Darwin"):
+                with patch("pr_watch.notifications.shutil.which", return_value="/usr/bin/osacompile"):
+                    with patch("pr_watch.notifications.subprocess.run", side_effect=fake_osacompile) as run:
+                        app_path = ensure_pr_watch_notification_app(tmpdir)
+
+            info = plistlib.loads((app_path / "Contents" / "Info.plist").read_bytes())
+            executable_exists = (app_path / "Contents" / "MacOS" / "applet").exists()
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual("/usr/bin/osacompile", command[0])
+        self.assertEqual("applet", info["CFBundleExecutable"])
+        self.assertEqual("PR Watch", info["CFBundleDisplayName"])
+        self.assertEqual(PR_WATCH_NOTIFICATION_BUNDLE_ID, info["CFBundleIdentifier"])
+        self.assertTrue(executable_exists)
 
     def test_desktop_notifier_uses_pr_watch_icon_and_conductor_open_url_when_available(self):
         from pr_watch.notifications import DesktopNotifier

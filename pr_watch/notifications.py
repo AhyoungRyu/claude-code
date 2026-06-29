@@ -370,10 +370,59 @@ def pr_watch_notification_app_path(state_dir: Optional[Path | str] = None) -> Pa
 
 def ensure_pr_watch_notification_app(state_dir: Optional[Path | str] = None) -> Path:
     app_path = pr_watch_notification_app_path(state_dir)
+    if _pr_watch_notification_app_is_current(app_path):
+        return app_path
+
+    osacompile = shutil.which("osacompile") if platform.system() == "Darwin" else None
+    if osacompile and _write_pr_watch_applescript_app(app_path, osacompile, state_dir):
+        return app_path
+
+    _write_pr_watch_shell_app(app_path, state_dir)
+    return app_path
+
+
+def _write_pr_watch_applescript_app(
+    app_path: Path,
+    osacompile: str,
+    state_dir: Optional[Path | str] = None,
+) -> bool:
+    if app_path.exists():
+        shutil.rmtree(app_path)
+    app_path.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [osacompile, "-e", 'do shell script "open conductor://open"', "-o", str(app_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not (app_path / "Contents" / "Info.plist").exists():
+        return False
+    _configure_pr_watch_app_bundle(app_path, state_dir)
+    return True
+
+
+def _write_pr_watch_shell_app(app_path: Path, state_dir: Optional[Path | str] = None) -> None:
+    if app_path.exists():
+        shutil.rmtree(app_path)
     contents = app_path / "Contents"
     macos = contents / "MacOS"
     resources = contents / "Resources"
     macos.mkdir(parents=True, exist_ok=True)
+    resources.mkdir(parents=True, exist_ok=True)
+
+    executable = macos / PR_WATCH_APP_EXECUTABLE_NAME
+    executable.write_text('#!/bin/sh\nopen "conductor://open"\n', encoding="utf-8")
+    executable.chmod(0o755)
+    _configure_pr_watch_app_bundle(app_path, state_dir, executable_name=PR_WATCH_APP_EXECUTABLE_NAME)
+
+
+def _configure_pr_watch_app_bundle(
+    app_path: Path,
+    state_dir: Optional[Path | str] = None,
+    executable_name: Optional[str] = None,
+) -> None:
+    contents = app_path / "Contents"
+    resources = contents / "Resources"
     resources.mkdir(parents=True, exist_ok=True)
 
     icon_source = pr_watch_icon_path(state_dir)
@@ -382,24 +431,49 @@ def ensure_pr_watch_notification_app(state_dir: Optional[Path | str] = None) -> 
     icon_target = resources / PR_WATCH_ICON_FILENAME
     icon_target.write_bytes(icon_source.read_bytes())
 
-    executable = macos / PR_WATCH_APP_EXECUTABLE_NAME
-    executable.write_text('#!/bin/sh\nopen "conductor://open"\n', encoding="utf-8")
-    executable.chmod(0o755)
+    info_path = contents / "Info.plist"
+    if info_path.exists():
+        with info_path.open("rb") as file:
+            info = plistlib.load(file)
+    else:
+        info = {}
+    executable_name = executable_name or info.get("CFBundleExecutable") or PR_WATCH_APP_EXECUTABLE_NAME
 
-    info = {
-        "CFBundleDisplayName": "PR Watch",
-        "CFBundleExecutable": PR_WATCH_APP_EXECUTABLE_NAME,
-        "CFBundleIdentifier": PR_WATCH_NOTIFICATION_BUNDLE_ID,
-        "CFBundleName": "PR Watch",
-        "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "1.0",
-        "CFBundleVersion": "1",
-        "LSMinimumSystemVersion": "13.0",
-    }
-    with (contents / "Info.plist").open("wb") as file:
+    info.update(
+        {
+            "CFBundleDisplayName": "PR Watch",
+            "CFBundleExecutable": executable_name,
+            "CFBundleIdentifier": PR_WATCH_NOTIFICATION_BUNDLE_ID,
+            "CFBundleName": "PR Watch",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1",
+            "LSMinimumSystemVersion": "13.0",
+        }
+    )
+    with info_path.open("wb") as file:
         plistlib.dump(info, file)
     (contents / "PkgInfo").write_text("APPL????", encoding="ascii")
-    return app_path
+
+
+def _pr_watch_notification_app_is_current(app_path: Path) -> bool:
+    info_path = app_path / "Contents" / "Info.plist"
+    if not info_path.exists():
+        return False
+    try:
+        with info_path.open("rb") as file:
+            info = plistlib.load(file)
+    except (OSError, plistlib.InvalidFileException):
+        return False
+    if info.get("CFBundleIdentifier") != PR_WATCH_NOTIFICATION_BUNDLE_ID:
+        return False
+    executable_name = info.get("CFBundleExecutable")
+    if not executable_name:
+        return False
+    executable = app_path / "Contents" / "MacOS" / executable_name
+    if not executable.exists():
+        return False
+    return executable_name != PR_WATCH_APP_EXECUTABLE_NAME
 
 
 def register_app_bundle(app_path: Path) -> None:
