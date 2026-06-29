@@ -172,7 +172,7 @@ def notify_event(
     title, message = render_notification(event, binding)
     state_dir = store.path.parent
     activation_bundle_id = activation_bundle_id_for_binding(binding) if is_conductor_binding(binding) else None
-    open_url = None if activation_bundle_id else open_url_for_event(event, binding)
+    open_url = open_url_for_event(event, binding)
     app_icon = pr_watch_icon_url(state_dir)
     sender_bundle_id, sender_app_path = sender_for_binding(binding, state_dir)
     target_url = CONDUCTOR_OPEN_URL if is_conductor_binding(binding) else open_url or event.pr_url
@@ -256,6 +256,7 @@ def notify_conductor_session_event(
         message,
         event,
         activation_bundle_id=HOST_ACTIVATION_BUNDLE_IDS["conductor"],
+        open_url=CONDUCTOR_OPEN_URL,
         app_icon=app_icon,
         sender_bundle_id=sender_bundle_id,
         sender_app_path=sender_app_path,

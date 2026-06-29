@@ -526,7 +526,7 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual(icon_url, command[command.index("-appIcon") + 1])
         self.assertNotIn("-sender", command)
 
-    def test_desktop_notification_uses_terminal_notifier_activation_when_host_is_known(self):
+    def test_desktop_notification_uses_conductor_open_url_when_host_is_known(self):
         from pr_watch.notifications import PR_WATCH_NOTIFICATION_BUNDLE_ID, RecordingNotifier, notify_event
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -551,7 +551,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual(PR_WATCH_NOTIFICATION_BUNDLE_ID, notifier.messages[0]["sender_bundle_id"])
             self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
             self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
-            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
             self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
@@ -596,7 +596,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("com.pr-watch.notification", notifier.messages[0]["sender_bundle_id"])
             self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
             self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
-            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             self.assertIsNone(store.get_notification(inbox_item.event_id, "desktop"))
             self.assertIsNotNone(store.get_notification(inbox_item.event_id, "desktop_conductor"))
@@ -648,7 +648,7 @@ class PrWatchTests(unittest.TestCase):
             self.assertEqual("com.pr-watch.notification", notifier.messages[0]["sender_bundle_id"])
             self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
             self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
-            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             notification = store.get_notification(inbox_item.event_id, CONDUCTOR_DESKTOP_CHANNEL)
             self.assertEqual("sent", notification.status)
@@ -703,7 +703,7 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual("com.conductor.app", command[command.index("-activate") + 1])
         self.assertNotIn(event.pr_url, command)
 
-    def test_desktop_notifier_uses_pr_watch_sender_icon_and_conductor_activation_when_available(self):
+    def test_desktop_notifier_uses_pr_watch_sender_icon_and_conductor_open_url_when_available(self):
         from pr_watch.notifications import DesktopNotifier
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -727,6 +727,7 @@ class PrWatchTests(unittest.TestCase):
                                 sender_bundle_id="com.pr-watch.notification",
                                 sender_app_path=app_path,
                                 activation_bundle_id="com.conductor.app",
+                                open_url="conductor://open",
                                 app_icon=icon_url,
                             )
 
@@ -737,9 +738,9 @@ class PrWatchTests(unittest.TestCase):
         self.assertEqual("com.pr-watch.notification", command[command.index("-sender") + 1])
         self.assertIn("-appIcon", command)
         self.assertEqual(icon_url, command[command.index("-appIcon") + 1])
-        self.assertIn("-activate", command)
-        self.assertEqual("com.conductor.app", command[command.index("-activate") + 1])
-        self.assertNotIn("-open", command)
+        self.assertIn("-open", command)
+        self.assertEqual("conductor://open", command[command.index("-open") + 1])
+        self.assertNotIn("-activate", command)
 
     def test_pr_watch_notification_app_bundle_contains_sender_identity(self):
         from pr_watch.notifications import (

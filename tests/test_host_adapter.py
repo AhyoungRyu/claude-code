@@ -316,7 +316,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertEqual("com.pr-watch.notification", notifier.messages[0]["sender_bundle_id"])
             self.assertIn("PR Watch.app", notifier.messages[0]["sender_app_path"])
             self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
-            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
             self.assertIn("pr-watch-notification.png", notifier.messages[0]["app_icon"])
             notification = store.get_notification(event.event_id, "desktop_conductor")
             self.assertIsNotNone(notification)
@@ -705,7 +705,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("queued for Conductor", notifier.messages[0]["title"])
             self.assertIn("will ask in Conductor when this session is idle", notifier.messages[0]["message"])
             self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
-            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
                 conn.execute("update sessions set status = 'idle' where id = 'conductor-session-1'")
@@ -755,7 +755,7 @@ class HostAdapterTests(unittest.TestCase):
             self.assertIn("queued for Conductor", notifier.messages[0]["title"])
             self.assertIn("will ask in Conductor when this session is idle", notifier.messages[0]["message"])
             self.assertEqual("com.conductor.app", notifier.messages[0]["activation_bundle_id"])
-            self.assertIsNone(notifier.messages[0]["open_url"])
+            self.assertEqual("conductor://open", notifier.messages[0]["open_url"])
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute("select count(*) from session_messages").fetchone()[0]
                 conn.execute("update sessions set status = 'idle' where id = 'conductor-session-1'")
